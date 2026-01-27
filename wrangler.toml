@@ -1,0 +1,7 @@
+name = "pbth-entsoe-bridge"
+main = "index.js"
+compatibility_date = "2026-01-27"
+
+[[kv_namespaces]]
+binding = "PBTH_STORAGE"
+id = "7b7bd180419941cc8358526514dd5c38"
