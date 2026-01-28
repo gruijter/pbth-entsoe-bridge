@@ -1,11 +1,12 @@
 /**
- * Power by the Hour - ENTSO-E Energy Bridge (v2.0)
+ * Power by the Hour - ENTSO-E Energy Bridge (v2.1)
 
  * GET /?zone=[EIC_CODE]&key=[AUTH_KEY]
  * GET /?status=true&key=[AUTH_KEY]
  * GET /?delete=[EIC_CODE]&key=[AUTH_KEY]
  * HOMEY WEBHOOK POST
  */
+
 
 const ZONE_NAMES = {
   // Benelux & West
@@ -25,7 +26,8 @@ const ZONE_NAMES = {
   "10YNO-3--------J": "Norway NO3 (Trondheim)",
   "10YNO-4--------9": "Norway NO4 (Tromsø)",
   "10YNO-5--------E": "Norway NO5 (Bergen)",
-  "10Y1001A1001A48H": "Norway NO5 (Bergen)", // Dubbele EIC check
+  "10Y1001A1001A48H": "Norway NO5 (Bergen)",
+  "50Y0JVU59B4JWQCU": "Norway NO2 North Sea Link",
   "10Y1001A1001A44P": "Sweden SE1",
   "10Y1001A1001A45N": "Sweden SE2",
   "10Y1001A1001A46L": "Sweden SE3",
@@ -101,7 +103,7 @@ export default {
           const priceMap = new Map(existingPrices.map(obj => [obj.time, obj.price]));
           newPrices.forEach(item => priceMap.set(item.time, item.price));
 
-          // ROLLING WINDOW: 48 HOURS BACK
+          // 48 HOUR ROLLING WINDOW
           const pruneLimit = new Date(Date.now() - 48 * 3600 * 1000).toISOString();
           const sortedPrices = Array.from(priceMap, ([time, price]) => ({ time, price }))
                                    .filter(item => item.time >= pruneLimit)
@@ -134,13 +136,14 @@ export default {
             );
           }
         }
+        // GECORRIGEERDE ACK LOGICA
         return new Response(this.generateAck(xmlData, env.MY_EIC_CODE), { headers: { "Content-Type": "application/xml" } });
       } catch (err) {
         return new Response(`Error: ${err.message}`, { status: 500 });
       }
     }
 
-    // --- 2. SECURITY & GET ---
+    // --- 2. SECURITY & STATUS ---
     const isAuthEnabled = env.AUTH_KEY && env.AUTH_KEY.trim().length > 0;
     if (isAuthEnabled) {
       const providedKey = url.searchParams.get("key") || request.headers.get("X-API-Key");
@@ -190,8 +193,22 @@ export default {
     return new Response("PBTH Bridge Online.", { status: 200 });
   },
 
-  generateAck(xml, eic) {
-    const mrid = xml.match(/<[^>]*mRID[^>]*>([^<]+)<\/[^>]*mRID>/)?.[1] || "unknown";
-    return `<?xml version="1.0" encoding="UTF-8"?><Acknowledgement_MarketDocument xmlns="urn:iec62325.351:tc57wg16:451-1:acknowledgementdocument:7:0"><mRID>${crypto.randomUUID()}</mRID><createdDateTime>${new Date().toISOString()}</createdDateTime><sender_MarketParticipant.mRID codingScheme="A01">10X1001A1001A450</sender_MarketParticipant.mRID><sender_MarketParticipant.marketRole.type>A32</sender_MarketParticipant.marketRole.type><receiver_MarketParticipant.mRID codingScheme="A01">${eic || '37XPBTH-DUMMY-1'}</receiver_MarketParticipant.mRID><receiver_MarketParticipant.marketRole.type>A39</receiver_MarketParticipant.marketRole.type><received_MarketDocument.mRID>${mrid}</received_MarketDocument.mRID><reason><code>A01</code></reason></Acknowledgement_MarketDocument>`;
+  // VERBETERDE ACK FUNCTIE VOOR ENTSO-E COMPLIANCE
+  generateAck(xml, myEic) {
+    const receivedMrid = xml.match(/<[^>]*mRID[^>]*>([^<]+)<\/[^>]*mRID>/)?.[1] || "unknown";
+    const zuluTime = new Date().toISOString().split('.')[0] + "Z"; // Verplicht formaat zonder ms
+    return `<?xml version="1.0" encoding="UTF-8"?>
+<Acknowledgement_MarketDocument xmlns="urn:iec62325.351:tc57wg16:451-1:acknowledgementdocument:7:0">
+  <mRID>${crypto.randomUUID()}</mRID>
+  <createdDateTime>${zuluTime}</createdDateTime>
+  <sender_MarketParticipant.mRID codingScheme="A01">${myEic || '37XPBTH-DUMMY-1'}</sender_MarketParticipant.mRID>
+  <sender_MarketParticipant.marketRole.type>A39</sender_MarketParticipant.marketRole.type>
+  <receiver_MarketParticipant.mRID codingScheme="A01">10X1001A1001A450</receiver_MarketParticipant.mRID>
+  <receiver_MarketParticipant.marketRole.type>A32</receiver_MarketParticipant.marketRole.type>
+  <received_MarketDocument.mRID>${receivedMrid}</received_MarketDocument.mRID>
+  <reason>
+    <code>A01</code>
+  </reason>
+</Acknowledgement_MarketDocument>`;
   }
 };
