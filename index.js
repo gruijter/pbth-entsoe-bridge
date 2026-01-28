@@ -51,8 +51,8 @@ export default {
           const priceMap = new Map(existingPrices.map(obj => [obj.time, obj.price]));
           newPrices.forEach(item => priceMap.set(item.time, item.price));
 
-          // 36h Rolling Window Pruning
-          const pruneLimit = new Date(Date.now() - 36 * 3600 * 1000).toISOString();
+          // 48h Rolling Window Pruning
+          const pruneLimit = new Date(Date.now() - 48 * 3600 * 1000).toISOString();
           const sortedPrices = Array.from(priceMap, ([time, price]) => ({ time, price }))
                                    .filter(item => item.time >= pruneLimit)
                                    .sort((a, b) => new Date(a.time) - new Date(b.time));
