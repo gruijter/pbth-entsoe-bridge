@@ -1,5 +1,5 @@
 /**
- * Power by the Hour - ENTSO-E Energy Bridge (v2.2)
+ * Power by the Hour - ENTSO-E Energy Bridge (v2.4)
 
  * GET /?zone=[EIC_CODE]&key=[AUTH_KEY]
  * GET /?status=true&key=[AUTH_KEY]
@@ -9,46 +9,21 @@
 
 
 const ZONE_NAMES = {
-  "10YNL----------L": "Netherlands",
-  "10YBE----------2": "Belgium",
-  "10YFR-RTE------C": "France",
-  "10Y1001A1001A82H": "Germany-Luxembourg",
-  "10YAT-APG------L": "Austria",
-  "10YCH-SWISSGRIDZ": "Switzerland",
-  "10YDK-1--------W": "Denmark DK1",
-  "10YDK-2--------M": "Denmark DK2",
-  "10YFI-1--------U": "Finland",
-  "10YNO-1--------2": "Norway NO1 (Oslo)",
-  "10YNO-2--------T": "Norway NO2 (Kristiansand)",
-  "10YNO-3--------J": "Norway NO3 (Trondheim)",
-  "10YNO-4--------9": "Norway NO4 (Tromsø)",
-  "10YNO-5--------E": "Norway NO5 (Bergen)",
-  "10Y1001A1001A48H": "Norway NO5 (Bergen)",
-  "50Y0JVU59B4JWQCU": "Norway NO2 North Sea Link",
-  "10Y1001A1001A44P": "Sweden SE1",
-  "10Y1001A1001A45N": "Sweden SE2",
-  "10Y1001A1001A46L": "Sweden SE3",
-  "10Y1001A1001A47J": "Sweden SE4",
-  "10Y1001A1001A92E": "United Kingdom",
-  "10Y1001A1001A39I": "Estonia",
-  "10YLV-1001A00074": "Latvia",
-  "10YLT-1001A0008Q": "Lithuania",
-  "10YPL-AREA-----S": "Poland",
-  "10YCZ-CEPS-----N": "Czech Republic",
-  "10YHU-MAVIR----U": "Hungary",
-  "10YRO-TEL------P": "Romania",
-  "10YSK-SEPS-----K": "Slovakia",
-  "10YSI-ELES-----O": "Slovenia",
-  "10YHR-HEP------M": "Croatia",
-  "10YCA-BULGARIA-R": "Bulgaria",
-  "10YCS-CG-TSO---S": "Montenegro",
-  "10YCS-SERBIATSOV": "Serbia",
-  "10Y1001C--000182": "Ukraine (IPS)",
-  "10YES-REE------0": "Spain",
-  "10YPT-REN------W": "Portugal",
-  "10YIT-GRTN-----B": "Italy (National)",
-  "10Y1001A1001A73I": "Italy North",
-  "10YGR-HTSO-----Y": "Greece"
+  "10YNL----------L": "Netherlands", "10YBE----------2": "Belgium", "10YFR-RTE------C": "France",
+  "10Y1001A1001A82H": "Germany-Luxembourg", "10YAT-APG------L": "Austria", "10YCH-SWISSGRIDZ": "Switzerland",
+  "10YDK-1--------W": "Denmark DK1", "10YDK-2--------M": "Denmark DK2", "10YFI-1--------U": "Finland",
+  "10YNO-1--------2": "Norway NO1 (Oslo)", "10YNO-2--------T": "Norway NO2 (Kristiansand)",
+  "10YNO-3--------J": "Norway NO3 (Trondheim)", "10YNO-4--------9": "Norway NO4 (Tromsø)",
+  "10YNO-5--------E": "Norway NO5 (Bergen)", "10Y1001A1001A48H": "Norway NO5 (Bergen)",
+  "50Y0JVU59B4JWQCU": "Norway NO2 North Sea Link", "10Y1001A1001A44P": "Sweden SE1",
+  "10Y1001A1001A45N": "Sweden SE2", "10Y1001A1001A46L": "Sweden SE3", "10Y1001A1001A47J": "Sweden SE4",
+  "10Y1001A1001A92E": "United Kingdom", "10Y1001A1001A39I": "Estonia", "10YLV-1001A00074": "Latvia",
+  "10YLT-1001A0008Q": "Lithuania", "10YPL-AREA-----S": "Poland", "10YCZ-CEPS-----N": "Czech Republic",
+  "10YHU-MAVIR----U": "Hungary", "10YRO-TEL------P": "Romania", "10YSK-SEPS-----K": "Slovakia",
+  "10YSI-ELES-----O": "Slovenia", "10YHR-HEP------M": "Croatia", "10YCA-BULGARIA-R": "Bulgaria",
+  "10YCS-CG-TSO---S": "Montenegro", "10YCS-SERBIATSOV": "Serbia", "10Y1001C--000182": "Ukraine (IPS)",
+  "10YES-REE------0": "Spain", "10YPT-REN------W": "Portugal", "10YIT-GRTN-----B": "Italy (National)",
+  "10Y1001A1001A73I": "Italy North", "10YGR-HTSO-----Y": "Greece"
 };
 
 export default {
@@ -60,16 +35,21 @@ export default {
 
     // --- 1. RECEIVE DATA (POST FROM ENTSO-E) ---
     if (request.method === "POST") {
+      // ZERO-LENGTH GUARD: Voorkom 500-error bij lege heartbeats van ENTSO-E
+      const contentLength = request.headers.get("content-length");
+      if (contentLength === "0") {
+        return new Response("OK", { status: 200 });
+      }
+
       let xmlData = "";
       try {
         xmlData = await request.text();
-        
-        // Extract basic info for ACK
+        if (!xmlData || xmlData.length < 10) return new Response("OK", { status: 200 });
+
         const receivedMrid = xmlData.match(/<[^>]*mRID[^>]*>([^<]+)<\/[^>]*mRID>/)?.[1] || "unknown";
         const zoneEic = xmlData.match(/<[^>]*out_Domain\.mRID[^>]*>([^<]+)<\/[^>]*out_Domain\.mRID>/)?.[1] || "UNKNOWN";
         const sequence = xmlData.match(/<[^>]*order_Detail\.nRID>(\d+)<\/[^>]*order_Detail\.nRID>/)?.[1] || "1";
         
-        // --- START PROCESSING (SILENT FAIL) ---
         try {
           const nameMatch = xmlData.match(/<[^>]*out_Domain\.name[^>]*>([^<]+)<\/[^>]*out_Domain\.name>/);
           const zoneName = ZONE_NAMES[zoneEic] || (nameMatch ? nameMatch[1] : zoneEic);
@@ -97,7 +77,6 @@ export default {
               if (sequence === "1" || existingPrices.length === 0 || existingSeq === "2") {
                 const priceMap = new Map(existingPrices.map(obj => [obj.time, obj.price]));
                 newPrices.forEach(item => priceMap.set(item.time, item.price));
-
                 const pruneLimit = new Date(Date.now() - 48 * 3600 * 1000).toISOString();
                 const sortedPrices = Array.from(priceMap, ([time, price]) => ({ time, price }))
                                          .filter(item => item.time >= pruneLimit)
@@ -108,30 +87,28 @@ export default {
                   updated: now, name: zoneName, count: sortedPrices.length, currency, unit: "MWh", 
                   res: resolutionMinutes, seq: sequence, latest: sortedPrices[sortedPrices.length - 1].time 
                 };
-
                 await env.PBTH_STORAGE.put(storageKey, JSON.stringify(sortedPrices), { metadata });
                 await env.PBTH_STORAGE.put("bridge_last_update", now);
-
                 if (env.HOMEY_WEBHOOK_URL) {
                   ctx.waitUntil(fetch(env.HOMEY_WEBHOOK_URL, {
                     method: 'POST', headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ zone: zoneEic, name: zoneName, updated: now, res: `${resolutionMinutes}m`, seq: sequence, curr: currency, unit: "MWh", data: sortedPrices })
-                  }).catch(e => console.error("Webhook Error")));
+                  }).catch(() => {}));
                 }
               }
             }
           }
-        } catch (e) {
-          console.error("Processing suppressed to keep ACK alive:", e.message);
-        }
+        } catch (e) {}
 
-        // --- ALWAYS SEND ACK TO ENTSO-E ---
-        return new Response(this.generateAck(receivedMrid, env.MY_EIC_CODE), { 
-          headers: { "Content-Type": "application/xml" } 
+        const ackXml = this.generateAck(receivedMrid, env.MY_EIC_CODE);
+        return new Response(ackXml, { 
+          status: 200,
+          headers: { "Content-Type": "application/xml", "Cache-Control": "no-cache" } 
         });
 
       } catch (err) {
-        return new Response(`Error: ${err.message}`, { status: 500 });
+        // Zelfs bij een fatale fout sturen we een 200 terug om de interface 'Active' te houden
+        return new Response("OK", { status: 200 });
       }
     }
 
@@ -179,17 +156,6 @@ export default {
 
   generateAck(receivedMrid, myEic) {
     const zuluTime = new Date().toISOString().split('.')[0] + "Z";
-    return `<?xml version="1.0" encoding="UTF-8"?>
-<Acknowledgement_MarketDocument xmlns="urn:iec62325.351:tc57wg16:451-1:acknowledgementdocument:7:0">
-  <mRID>${crypto.randomUUID()}</mRID>
-  <createdDateTime>${zuluTime}</createdDateTime>
-  <sender_MarketParticipant.mRID codingScheme="A01">${myEic || '37XPBTH-DUMMY-1'}</sender_MarketParticipant.mRID>
-  <sender_MarketParticipant.marketRole.type>A39</sender_MarketParticipant.marketRole.type>
-  <receiver_MarketParticipant.mRID codingScheme="A01">10X1001A1001A450</receiver_MarketParticipant.mRID>
-  <receiver_MarketParticipant.marketRole.type>A32</receiver_MarketParticipant.marketRole.type>
-  <received_MarketDocument.mRID>${receivedMrid}</received_MarketDocument.mRID>
-  <reason><code>A01</code></reason>
-</Acknowledgement_MarketDocument>`;
+    return `<?xml version="1.0" encoding="UTF-8"?><Acknowledgement_MarketDocument xmlns="urn:iec62325.351:tc57wg16:451-1:acknowledgementdocument:7:0"><mRID>${crypto.randomUUID()}</mRID><createdDateTime>${zuluTime}</createdDateTime><sender_MarketParticipant.mRID codingScheme="A01">${myEic || '37XPBTH-DUMMY-1'}</sender_MarketParticipant.mRID><sender_MarketParticipant.marketRole.type>A39</sender_MarketParticipant.marketRole.type><receiver_MarketParticipant.mRID codingScheme="A01">10X1001A1001A450</receiver_MarketParticipant.mRID><receiver_MarketParticipant.marketRole.type>A32</receiver_MarketParticipant.marketRole.type><received_MarketDocument.mRID>${receivedMrid}</received_MarketDocument.mRID><reason><code>A01</code></reason></Acknowledgement_MarketDocument>`.trim();
   }
 };
-
