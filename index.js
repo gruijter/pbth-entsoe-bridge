@@ -1,5 +1,5 @@
 /**
- * Power by the Hour - ENTSO-E Energy Bridge (v1.6)
+ * Power by the Hour - ENTSO-E Energy Bridge (v1.7)
 
  * GET /?zone=[EIC_CODE]&key=[AUTH_KEY]
  * GET /?status=true&key=[AUTH_KEY]
@@ -20,7 +20,9 @@ export default {
       try {
         const xmlData = await request.text();
         
+        // Extract Metadata
         zoneEic = xmlData.match(/<(?:.*:)?out_Domain\.mRID[^>]*>([^<]+)<\/(?:.*:)?out_Domain\.mRID>/)?.[1] || "UNKNOWN";
+        const zoneName = xmlData.match(/<(?:.*:)?out_Domain\.name>([^<]+)<\/(?:.*:)?out_Domain\.name>/)?.[1] || "N/A";
         const sequence = xmlData.match(/<(?:.*:)?order_Detail\.nRID>(\d+)<\/(?:.*:)?order_Detail\.nRID>/)?.[1] || "1";
         const currency = xmlData.match(/<(?:.*:)?currency_Unit\.name>([^<]+)<\/(?:.*:)?currency_Unit\.name>/)?.[1] || "EUR";
         const resolutionRaw = xmlData.match(/<(?:.*:)?resolution>([^<]+)<\/(?:.*:)?resolution>/)?.[1] || "PT60M";
@@ -49,36 +51,45 @@ export default {
           const priceMap = new Map(existingPrices.map(obj => [obj.time, obj.price]));
           newPrices.forEach(item => priceMap.set(item.time, item.price));
 
-          // 48h Rolling Window Pruning
           const pruneLimit = new Date(Date.now() - 48 * 3600 * 1000).toISOString();
           const sortedPrices = Array.from(priceMap, ([time, price]) => ({ time, price }))
                                    .filter(item => item.time >= pruneLimit)
                                    .sort((a, b) => new Date(a.time) - new Date(b.time));
 
           const now = new Date().toISOString();
-          const latestPriceTime = sortedPrices[sortedPrices.length - 1].time; // Laatste tijdstip in buffer
+          const latestPriceTime = sortedPrices[sortedPrices.length - 1].time;
 
           const metadata = { 
             updated: now, 
+            name: zoneName, // Nieuw: Naam van de zone
             count: sortedPrices.length, 
             currency, 
             unit: "MWh", 
             res: resolutionMinutes, 
             seq: sequence, 
-            latest: latestPriceTime, // Nieuw: laatste prijs tijdstempel
+            latest: latestPriceTime,
             last_status: "OK" 
           };
 
           await env.PBTH_STORAGE.put(storageKey, JSON.stringify(sortedPrices), { metadata });
           await env.PBTH_STORAGE.put("bridge_last_update", now);
 
-          // Webhook push
+          // Webhook push inclusief naam
           if (env.HOMEY_WEBHOOK_URL && env.HOMEY_WEBHOOK_URL.trim().length > 0) {
             ctx.waitUntil(
               fetch(env.HOMEY_WEBHOOK_URL, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ zone: zoneEic, updated: now, res: resolutionMinutes, seq: sequence, curr: currency, unit: "MWh", data: sortedPrices })
+                body: JSON.stringify({ 
+                  zone: zoneEic, 
+                  name: zoneName,
+                  updated: now, 
+                  res: `${resolutionMinutes}m`, 
+                  seq: sequence, 
+                  curr: currency, 
+                  unit: "MWh", 
+                  data: sortedPrices 
+                })
               }).catch(e => console.error(`[Webhook Error] ${e.message}`))
             );
           }
@@ -102,13 +113,14 @@ export default {
       const lastUpdate = await env.PBTH_STORAGE.get("bridge_last_update") || "N/A";
       
       const targetTime = new Date();
-      targetTime.setUTCHours(23, 0, 0, 0); // Einde van de dag in UTC
+      targetTime.setUTCHours(23, 0, 0, 0); 
       const targetISO = targetTime.toISOString();
 
       const zones = list.keys.map(k => {
         const isCompleteToday = k.metadata?.latest && k.metadata.latest >= targetISO;
         return {
           zone: k.name.replace(STORAGE_PREFIX, ""),
+          name: k.metadata?.name || "N/A", // Nieuw in status
           updated: k.metadata?.updated || "N/A",
           latest_data: k.metadata?.latest || "N/A",
           is_complete_today: !!isCompleteToday,
@@ -140,8 +152,15 @@ export default {
       const { value, metadata } = await env.PBTH_STORAGE.getWithMetadata(STORAGE_PREFIX + zone);
       if (!value) return new Response(JSON.stringify({ error: "Zone not found" }), { status: 404 });
       return new Response(JSON.stringify({
-        zone, updated: metadata?.updated, points: metadata?.count, res: `${metadata?.res}m`,
-        seq: metadata?.seq, curr: metadata?.currency, unit: metadata?.unit || "MWh", data: JSON.parse(value)
+        zone, 
+        name: metadata?.name || "N/A",
+        updated: metadata?.updated, 
+        points: metadata?.count, 
+        res: `${metadata?.res}m`,
+        seq: metadata?.seq, 
+        curr: metadata?.currency, 
+        unit: metadata?.unit || "MWh", 
+        data: JSON.parse(value)
       }, null, 2), { headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*", "Cache-Control": "public, max-age=300" } });
     }
 
