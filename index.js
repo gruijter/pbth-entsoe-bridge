@@ -1,5 +1,5 @@
 /**
- * Power by the Hour - ENTSO-E Energy Bridge (v1.7)
+ * Power by the Hour - ENTSO-E Energy Bridge (v1.8)
 
  * GET /?zone=[EIC_CODE]&key=[AUTH_KEY]
  * GET /?status=true&key=[AUTH_KEY]
@@ -22,7 +22,8 @@ export default {
         
         // Extract Metadata
         zoneEic = xmlData.match(/<(?:.*:)?out_Domain\.mRID[^>]*>([^<]+)<\/(?:.*:)?out_Domain\.mRID>/)?.[1] || "UNKNOWN";
-        const zoneName = xmlData.match(/<(?:.*:)?out_Domain\.name>([^<]+)<\/(?:.*:)?out_Domain\.name>/)?.[1] || "N/A";
+        const nameMatch = xmlData.match(/<[^>]*out_Domain\.name[^>]*>([^<]+)<\/[^>]*out_Domain\.name>/);
+        const zoneName = nameMatch ? nameMatch[1] : "N/A";
         const sequence = xmlData.match(/<(?:.*:)?order_Detail\.nRID>(\d+)<\/(?:.*:)?order_Detail\.nRID>/)?.[1] || "1";
         const currency = xmlData.match(/<(?:.*:)?currency_Unit\.name>([^<]+)<\/(?:.*:)?currency_Unit\.name>/)?.[1] || "EUR";
         const resolutionRaw = xmlData.match(/<(?:.*:)?resolution>([^<]+)<\/(?:.*:)?resolution>/)?.[1] || "PT60M";
