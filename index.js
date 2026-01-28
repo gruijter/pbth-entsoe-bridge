@@ -1,5 +1,5 @@
 /**
- * Power by the Hour - ENTSO-E Energy Bridge (v1.5)
+ * Power by the Hour - ENTSO-E Energy Bridge (v1.6)
 
  * GET /?zone=[EIC_CODE]&key=[AUTH_KEY]
  * GET /?status=true&key=[AUTH_KEY]
@@ -20,7 +20,6 @@ export default {
       try {
         const xmlData = await request.text();
         
-        // Metadata Extractie
         zoneEic = xmlData.match(/<(?:.*:)?out_Domain\.mRID[^>]*>([^<]+)<\/(?:.*:)?out_Domain\.mRID>/)?.[1] || "UNKNOWN";
         const sequence = xmlData.match(/<(?:.*:)?order_Detail\.nRID>(\d+)<\/(?:.*:)?order_Detail\.nRID>/)?.[1] || "1";
         const currency = xmlData.match(/<(?:.*:)?currency_Unit\.name>([^<]+)<\/(?:.*:)?currency_Unit\.name>/)?.[1] || "EUR";
@@ -46,7 +45,6 @@ export default {
         const existingPrices = existing.value ? JSON.parse(existing.value) : [];
         const existingSeq = existing.metadata?.seq || "0";
 
-        // Conflict Resolutie: Sequence 1 (SDAC) heeft altijd voorrang
         if (sequence === "1" || existingPrices.length === 0 || existingSeq === "2") {
           const priceMap = new Map(existingPrices.map(obj => [obj.time, obj.price]));
           newPrices.forEach(item => priceMap.set(item.time, item.price));
@@ -58,6 +56,8 @@ export default {
                                    .sort((a, b) => new Date(a.time) - new Date(b.time));
 
           const now = new Date().toISOString();
+          const latestPriceTime = sortedPrices[sortedPrices.length - 1].time; // Laatste tijdstip in buffer
+
           const metadata = { 
             updated: now, 
             count: sortedPrices.length, 
@@ -65,99 +65,83 @@ export default {
             unit: "MWh", 
             res: resolutionMinutes, 
             seq: sequence, 
+            latest: latestPriceTime, // Nieuw: laatste prijs tijdstempel
             last_status: "OK" 
           };
 
-          // Opslaan in KV
           await env.PBTH_STORAGE.put(storageKey, JSON.stringify(sortedPrices), { metadata });
           await env.PBTH_STORAGE.put("bridge_last_update", now);
 
-          // --- FULL PAYLOAD WEBHOOK PUSH (Background Task) ---
+          // Webhook push
           if (env.HOMEY_WEBHOOK_URL && env.HOMEY_WEBHOOK_URL.trim().length > 0) {
-            const fullPayload = {
-              zone: zoneEic,
-              updated: now,
-              fresh: true,
-              points: sortedPrices.length,
-              res: `${resolutionMinutes}m`,
-              seq: sequence,
-              curr: currency,
-              unit: "MWh",
-              data: sortedPrices
-            };
-
             ctx.waitUntil(
               fetch(env.HOMEY_WEBHOOK_URL, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(fullPayload)
-              }).then(res => {
-                console.log(`[Webhook] Full payload sent for ${zoneEic}. Status: ${res.status}`);
-              }).catch(e => {
-                console.error(`[Webhook Error] Failed to push ${zoneEic}: ${e.message}`);
-              })
+                body: JSON.stringify({ zone: zoneEic, updated: now, res: resolutionMinutes, seq: sequence, curr: currency, unit: "MWh", data: sortedPrices })
+              }).catch(e => console.error(`[Webhook Error] ${e.message}`))
             );
           }
-
-          console.log(`[Success] ${zoneEic} updated and pushed.`);
         }
-
         return new Response(this.generateAck(xmlData, env.MY_EIC_CODE), { headers: { "Content-Type": "application/xml" } });
       } catch (err) {
-        console.error(`[Error] ${zoneEic}: ${err.message}`);
         return new Response(`Error: ${err.message}`, { status: 500 });
       }
     }
 
-    // --- 2. SECURITY CHECK (GET ONLY) ---
+    // --- 2. SECURITY CHECK ---
     const isAuthEnabled = env.AUTH_KEY && env.AUTH_KEY.trim().length > 0;
     if (isAuthEnabled) {
       const providedKey = url.searchParams.get("key") || request.headers.get("X-API-Key");
       if (providedKey !== env.AUTH_KEY.trim()) return new Response("Unauthorized", { status: 401 });
     }
 
-    // --- 3. GET LOGIC (STATUS / ZONE DATA) ---
-    
-    // Status Dashboard
+    // --- 3. STATUS DASHBOARD ---
     if (url.searchParams.has("status")) {
       const list = await env.PBTH_STORAGE.list({ prefix: STORAGE_PREFIX });
       const lastUpdate = await env.PBTH_STORAGE.get("bridge_last_update") || "N/A";
-      const zones = list.keys.map(k => ({
-        zone: k.name.replace(STORAGE_PREFIX, ""),
-        updated: k.metadata?.updated || "N/A",
-        points: k.metadata?.count || 0,
-        res: `${k.metadata?.res || 60}m`,
-        seq: k.metadata?.seq || "1",
-        curr: k.metadata?.currency || "EUR",
-        unit: k.metadata?.unit || "MWh"
-      }));
+      
+      const targetTime = new Date();
+      targetTime.setUTCHours(23, 0, 0, 0); // Einde van de dag in UTC
+      const targetISO = targetTime.toISOString();
+
+      const zones = list.keys.map(k => {
+        const isCompleteToday = k.metadata?.latest && k.metadata.latest >= targetISO;
+        return {
+          zone: k.name.replace(STORAGE_PREFIX, ""),
+          updated: k.metadata?.updated || "N/A",
+          latest_data: k.metadata?.latest || "N/A",
+          is_complete_today: !!isCompleteToday,
+          points: k.metadata?.count || 0,
+          res: `${k.metadata?.res || 60}m`,
+          seq: k.metadata?.seq || "1",
+          curr: k.metadata?.currency || "EUR"
+        };
+      });
+
+      const completeCount = zones.filter(z => z.is_complete_today).length;
+      const healthscore = zones.length > 0 ? Math.round((completeCount / zones.length) * 100) : 0;
 
       return new Response(JSON.stringify({ 
         bridge: "PBTH Energy Bridge Pro", 
-        summary: { total_zones: zones.length, last_push: lastUpdate, webhook_active: !!env.HOMEY_WEBHOOK_URL },
+        summary: { 
+          total_zones: zones.length, 
+          complete_today: completeCount,
+          health_score: `${healthscore}%`, 
+          last_push: lastUpdate 
+        },
         zones: zones.sort((a,b) => a.zone.localeCompare(b.zone)) 
       }, null, 2), { headers: { "Content-Type": "application/json" } });
     }
 
-    // Handmatige Zone Opvraging
+    // --- 4. GET ZONE DATA ---
     const zone = url.searchParams.get("zone");
     if (zone) {
       const { value, metadata } = await env.PBTH_STORAGE.getWithMetadata(STORAGE_PREFIX + zone);
       if (!value) return new Response(JSON.stringify({ error: "Zone not found" }), { status: 404 });
-
-      const lastUpd = metadata?.updated ? new Date(metadata.updated) : null;
-      const isFresh = lastUpd && (new Date() - lastUpd) < 86400000;
-
       return new Response(JSON.stringify({
-        zone,
-        updated: metadata?.updated,
-        fresh: isFresh,
-        points: metadata?.count,
-        res: `${metadata?.res}m`,
-        seq: metadata?.seq,
-        curr: metadata?.currency,
-        unit: metadata?.unit,
-        data: JSON.parse(value)
+        zone, updated: metadata?.updated, points: metadata?.count, res: `${metadata?.res}m`,
+        seq: metadata?.seq, curr: metadata?.currency, unit: metadata?.unit || "MWh", data: JSON.parse(value)
       }, null, 2), { headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*", "Cache-Control": "public, max-age=300" } });
     }
 
