@@ -5,3 +5,18 @@ compatibility_date = "2026-01-27"
 [[kv_namespaces]]
 binding = "PBTH_STORAGE"
 id = "7b7bd180419941cc8358526514dd5c38"
+
+[observability]
+enabled = false
+head_sampling_rate = 1
+
+[observability.logs]
+enabled = true
+head_sampling_rate = 1
+persist = true
+invocation_logs = true
+
+[observability.traces]
+enabled = false
+persist = true
+head_sampling_rate = 1
