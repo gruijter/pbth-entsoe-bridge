@@ -1,12 +1,11 @@
 /**
- * Power by the Hour - ENTSO-E Energy Bridge (v2.4)
+ * Power by the Hour - ENTSO-E Energy Bridge (v2.5)
 
  * GET /?zone=[EIC_CODE]&key=[AUTH_KEY]
  * GET /?status=true&key=[AUTH_KEY]
  * GET /?delete=[EIC_CODE]&key=[AUTH_KEY]
  * HOMEY WEBHOOK POST
  */
-
 
 const ZONE_NAMES = {
   "10YNL----------L": "Netherlands", "10YBE----------2": "Belgium", "10YFR-RTE------C": "France",
@@ -23,7 +22,7 @@ const ZONE_NAMES = {
   "10YSI-ELES-----O": "Slovenia", "10YHR-HEP------M": "Croatia", "10YCA-BULGARIA-R": "Bulgaria",
   "10YCS-CG-TSO---S": "Montenegro", "10YCS-SERBIATSOV": "Serbia", "10Y1001C--000182": "Ukraine (IPS)",
   "10YES-REE------0": "Spain", "10YPT-REN------W": "Portugal", "10YIT-GRTN-----B": "Italy (National)",
-  "10Y1001A1001A73I": "Italy North", "10YGR-HTSO-----Y": "Greece"
+  "10Y1001A1001A73I": "Italy North", "10YGR-HTSO-----Y": "Greece", "10Y1001A1001A59C": "Germany (Amprion Area)"
 };
 
 export default {
@@ -33,86 +32,72 @@ export default {
 
     if (url.pathname === '/favicon.ico') return new Response(null, { status: 204 });
 
-    // --- 1. RECEIVE DATA (POST FROM ENTSO-E) ---
     if (request.method === "POST") {
-      // ZERO-LENGTH GUARD: Voorkom 500-error bij lege heartbeats van ENTSO-E
       const contentLength = request.headers.get("content-length");
-      if (contentLength === "0") {
-        return new Response("OK", { status: 200 });
-      }
+      // Meteen 200 OK bij hartslag of lege POST
+      if (contentLength === "0") return new Response("OK", { status: 200 });
 
-      let xmlData = "";
       try {
-        xmlData = await request.text();
-        if (!xmlData || xmlData.length < 10) return new Response("OK", { status: 200 });
+        const xmlData = await request.text();
+        if (!xmlData || xmlData.length < 50) return new Response("OK", { status: 200 });
 
         const receivedMrid = xmlData.match(/<[^>]*mRID[^>]*>([^<]+)<\/[^>]*mRID>/)?.[1] || "unknown";
         const zoneEic = xmlData.match(/<[^>]*out_Domain\.mRID[^>]*>([^<]+)<\/[^>]*out_Domain\.mRID>/)?.[1] || "UNKNOWN";
         const sequence = xmlData.match(/<[^>]*order_Detail\.nRID>(\d+)<\/[^>]*order_Detail\.nRID>/)?.[1] || "1";
         
-        try {
-          const nameMatch = xmlData.match(/<[^>]*out_Domain\.name[^>]*>([^<]+)<\/[^>]*out_Domain\.name>/);
-          const zoneName = ZONE_NAMES[zoneEic] || (nameMatch ? nameMatch[1] : zoneEic);
-          const currency = xmlData.match(/<[^>]*currency_Unit\.name>([^<]+)<\/[^>]*currency_Unit\.name>/)?.[1] || "EUR";
-          const resolutionRaw = xmlData.match(/<[^>]*resolution>([^<]+)<\/[^>]*resolution>/)?.[1] || "PT60M";
-          const startMatch = xmlData.match(/<[^>]*start>([^<]+)<\/[^>]*start>/);
-          
-          if (startMatch) {
-            const startTime = new Date(startMatch[1]);
-            const resolutionMinutes = resolutionRaw.includes("PT15M") ? 15 : 60;
-            const newPrices = [];
-            const pointRegex = /<[^>]*Point>[\s\S]*?<[^>]*position>(\d+)<\/[^>]*position>[\s\S]*?<[^>]*price\.amount>([\d.]+)<\/[^>]*price\.amount>[\s\S]*?<\/[^>]*Point>/g;
-            let match;
-            while ((match = pointRegex.exec(xmlData)) !== null) {
-              const timestamp = new Date(startTime.getTime() + (parseInt(match[1]) - 1) * resolutionMinutes * 60000);
-              newPrices.push({ time: timestamp.toISOString(), price: parseFloat(match[2]) });
-            }
+        ctx.waitUntil((async () => {
+          try {
+            const nameMatch = xmlData.match(/<[^>]*out_Domain\.name[^>]*>([^<]+)<\/[^>]*out_Domain\.name>/);
+            const zoneName = ZONE_NAMES[zoneEic] || (nameMatch ? nameMatch[1] : zoneEic);
+            const currency = xmlData.match(/<[^>]*currency_Unit\.name>([^<]+)<\/[^>]*currency_Unit\.name>/)?.[1] || "EUR";
+            const resolutionRaw = xmlData.match(/<[^>]*resolution>([^<]+)<\/[^>]*resolution>/)?.[1] || "PT60M";
+            const startMatch = xmlData.match(/<[^>]*start>([^<]+)<\/[^>]*start>/);
+            
+            if (startMatch) {
+              const startTime = new Date(startMatch[1]);
+              const resMin = resolutionRaw.includes("PT15M") ? 15 : 60;
+              const newPrices = [];
+              const pointRegex = /<[^>]*Point>[\s\S]*?<[^>]*position>(\d+)<\/[^>]*position>[\s\S]*?<[^>]*price\.amount>([\d.]+)<\/[^>]*price\.amount>[\s\S]*?<\/[^>]*Point>/g;
+              let match;
+              while ((match = pointRegex.exec(xmlData)) !== null) {
+                const timestamp = new Date(startTime.getTime() + (parseInt(match[1]) - 1) * resMin * 60000);
+                newPrices.push({ time: timestamp.toISOString(), price: parseFloat(match[2]) });
+              }
 
-            if (newPrices.length > 0) {
-              const storageKey = STORAGE_PREFIX + zoneEic;
-              const existing = await env.PBTH_STORAGE.getWithMetadata(storageKey);
-              const existingPrices = existing.value ? JSON.parse(existing.value) : [];
-              const existingSeq = existing.metadata?.seq || "0";
+              if (newPrices.length > 0) {
+                const storageKey = STORAGE_PREFIX + zoneEic;
+                const existing = await env.PBTH_STORAGE.getWithMetadata(storageKey);
+                const existingPrices = existing.value ? JSON.parse(existing.value) : [];
+                const existingSeq = existing.metadata?.seq || "0";
 
-              if (sequence === "1" || existingPrices.length === 0 || existingSeq === "2") {
-                const priceMap = new Map(existingPrices.map(obj => [obj.time, obj.price]));
-                newPrices.forEach(item => priceMap.set(item.time, item.price));
-                const pruneLimit = new Date(Date.now() - 48 * 3600 * 1000).toISOString();
-                const sortedPrices = Array.from(priceMap, ([time, price]) => ({ time, price }))
-                                         .filter(item => item.time >= pruneLimit)
-                                         .sort((a, b) => new Date(a.time) - new Date(b.time));
+                if (sequence === "1" || existingPrices.length === 0 || existingSeq === "2") {
+                  const priceMap = new Map(existingPrices.map(obj => [obj.time, obj.price]));
+                  newPrices.forEach(item => priceMap.set(item.time, item.price));
+                  const pruneLimit = new Date(Date.now() - 48 * 3600 * 1000).toISOString();
+                  const sortedPrices = Array.from(priceMap, ([time, price]) => ({ time, price }))
+                                           .filter(item => item.time >= pruneLimit)
+                                           .sort((a, b) => new Date(a.time) - new Date(b.time));
 
-                const now = new Date().toISOString();
-                const metadata = { 
-                  updated: now, name: zoneName, count: sortedPrices.length, currency, unit: "MWh", 
-                  res: resolutionMinutes, seq: sequence, latest: sortedPrices[sortedPrices.length - 1].time 
-                };
-                await env.PBTH_STORAGE.put(storageKey, JSON.stringify(sortedPrices), { metadata });
-                await env.PBTH_STORAGE.put("bridge_last_update", now);
-                if (env.HOMEY_WEBHOOK_URL) {
-                  ctx.waitUntil(fetch(env.HOMEY_WEBHOOK_URL, {
-                    method: 'POST', headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ zone: zoneEic, name: zoneName, updated: now, res: `${resolutionMinutes}m`, seq: sequence, curr: currency, unit: "MWh", data: sortedPrices })
-                  }).catch(() => {}));
+                  const now = new Date().toISOString();
+                  const metadata = { updated: now, name: zoneName, count: sortedPrices.length, currency, unit: "MWh", res: resMin, seq: sequence, latest: sortedPrices[sortedPrices.length - 1].time };
+                  await env.PBTH_STORAGE.put(storageKey, JSON.stringify(sortedPrices), { metadata });
+                  await env.PBTH_STORAGE.put("bridge_last_update", now);
+                  if (env.HOMEY_WEBHOOK_URL) {
+                    await fetch(env.HOMEY_WEBHOOK_URL, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ zone: zoneEic, name: zoneName, updated: now, data: sortedPrices }) }).catch(() => {});
+                  }
                 }
               }
             }
-          }
-        } catch (e) {}
+          } catch (e) { console.error("Async error ignored to keep ACK alive"); }
+        })());
 
-        const ackXml = this.generateAck(receivedMrid, env.MY_EIC_CODE);
-        return new Response(ackXml, { 
-          status: 200,
-          headers: { "Content-Type": "application/xml", "Cache-Control": "no-cache" } 
-        });
-
+        return new Response(this.generateAck(receivedMrid, env.MY_EIC_CODE), { status: 200, headers: { "Content-Type": "application/xml" } });
       } catch (err) {
-        // Zelfs bij een fatale fout sturen we een 200 terug om de interface 'Active' te houden
         return new Response("OK", { status: 200 });
       }
     }
 
-    // --- 2. STATUS & GET ---
+    // --- GET LOGIC (Status/Zone) ---
     const isAuthEnabled = env.AUTH_KEY && env.AUTH_KEY.trim().length > 0;
     if (isAuthEnabled) {
       const key = url.searchParams.get("key") || request.headers.get("X-API-Key");
@@ -126,36 +111,23 @@ export default {
       const zones = list.keys.map(k => {
         const isComplete = k.metadata?.latest && k.metadata.latest >= targetISO;
         const eic = k.name.replace(STORAGE_PREFIX, "");
-        return {
-          zone: eic, name: k.metadata?.name || ZONE_NAMES[eic] || "N/A",
-          updated: k.metadata?.updated || "N/A", latest_data: k.metadata?.latest || "N/A",
-          is_complete_today: !!isComplete, points: k.metadata?.count || 0,
-          res: `${k.metadata?.res || 60}m`, seq: k.metadata?.seq || "1", curr: k.metadata?.currency || "EUR"
-        };
+        return { zone: eic, name: k.metadata?.name || ZONE_NAMES[eic] || "N/A", updated: k.metadata?.updated || "N/A", latest_data: k.metadata?.latest || "N/A", is_complete_today: !!isComplete, points: k.metadata?.count || 0, res: `${k.metadata?.res || 60}m`, seq: k.metadata?.seq || "1", curr: k.metadata?.currency || "EUR" };
       });
       const health = zones.length > 0 ? Math.round((zones.filter(z => z.is_complete_today).length / zones.length) * 100) : 0;
-      return new Response(JSON.stringify({ 
-        bridge: "PBTH Energy Bridge Pro", 
-        summary: { total_zones: zones.length, health_score: `${health}%`, last_push: lastUpdate },
-        zones: zones.sort((a,b) => a.zone.localeCompare(b.zone)) 
-      }, null, 2), { headers: { "Content-Type": "application/json" } });
+      return new Response(JSON.stringify({ bridge: "PBTH Energy Bridge Pro", summary: { total_zones: zones.length, health_score: `${health}%`, last_push: lastUpdate }, zones: zones.sort((a,b) => a.zone.localeCompare(b.zone)) }, null, 2), { headers: { "Content-Type": "application/json" } });
     }
 
     const zone = url.searchParams.get("zone");
     if (zone) {
       const { value, metadata } = await env.PBTH_STORAGE.getWithMetadata(STORAGE_PREFIX + zone);
       if (!value) return new Response(JSON.stringify({ error: "Zone not found" }), { status: 404 });
-      return new Response(JSON.stringify({
-        zone, name: metadata?.name || ZONE_NAMES[zone] || "N/A", updated: metadata?.updated, points: metadata?.count, res: `${metadata?.res}m`,
-        seq: metadata?.seq, curr: metadata?.currency, unit: "MWh", data: JSON.parse(value)
-      }, null, 2), { headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*", "Cache-Control": "public, max-age=300" } });
+      return new Response(JSON.stringify({ zone, name: metadata?.name || ZONE_NAMES[zone] || "N/A", updated: metadata?.updated, points: metadata?.count, res: `${metadata?.res}m`, data: JSON.parse(value) }, null, 2), { headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*", "Cache-Control": "public, max-age=300" } });
     }
-
     return new Response("PBTH Bridge Online.", { status: 200 });
   },
 
-  generateAck(receivedMrid, myEic) {
-    const zuluTime = new Date().toISOString().split('.')[0] + "Z";
-    return `<?xml version="1.0" encoding="UTF-8"?><Acknowledgement_MarketDocument xmlns="urn:iec62325.351:tc57wg16:451-1:acknowledgementdocument:7:0"><mRID>${crypto.randomUUID()}</mRID><createdDateTime>${zuluTime}</createdDateTime><sender_MarketParticipant.mRID codingScheme="A01">${myEic || '37XPBTH-DUMMY-1'}</sender_MarketParticipant.mRID><sender_MarketParticipant.marketRole.type>A39</sender_MarketParticipant.marketRole.type><receiver_MarketParticipant.mRID codingScheme="A01">10X1001A1001A450</receiver_MarketParticipant.mRID><receiver_MarketParticipant.marketRole.type>A32</receiver_MarketParticipant.marketRole.type><received_MarketDocument.mRID>${receivedMrid}</received_MarketDocument.mRID><reason><code>A01</code></reason></Acknowledgement_MarketDocument>`.trim();
+  generateAck(mrid, myEic) {
+    const time = new Date().toISOString().split('.')[0] + "Z";
+    return `<?xml version="1.0" encoding="UTF-8"?><Acknowledgement_MarketDocument xmlns="urn:iec62325.351:tc57wg16:451-1:acknowledgementdocument:7:0"><mRID>${crypto.randomUUID()}</mRID><createdDateTime>${time}</createdDateTime><sender_MarketParticipant.mRID codingScheme="A01">${myEic || '37XPBTH-DUMMY-1'}</sender_MarketParticipant.mRID><sender_MarketParticipant.marketRole.type>A39</sender_MarketParticipant.marketRole.type><receiver_MarketParticipant.mRID codingScheme="A01">10X1001A1001A450</receiver_MarketParticipant.mRID><receiver_MarketParticipant.marketRole.type>A32</receiver_MarketParticipant.marketRole.type><received_MarketDocument.mRID>${mrid}</received_MarketDocument.mRID><reason><code>A01</code></reason></Acknowledgement_MarketDocument>`.trim();
   }
 };
