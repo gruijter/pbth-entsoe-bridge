@@ -1,5 +1,5 @@
 /**
- * Power by the Hour - ENTSO-E Energy Bridge (v2.8)
+ * Power by the Hour - ENTSO-E Energy Bridge (v3.0)
 
  * GET /?zone=[EIC_CODE]&key=[AUTH_KEY]
  * GET /?status=true&key=[AUTH_KEY]
@@ -26,50 +26,63 @@ const ZONE_NAMES = {
   "10Y1001A1001A73I": "Italy North", "10YGR-HTSO-----Y": "Greece", "10Y1001A1001A59C": "Germany (Amprion Area)"
 };
 
+// Helper voor robuuste XML extractie (negeert namespaces/attributes)
+const getTagValue = (xml, tagName) => {
+  const regex = new RegExp(`<[^>]*${tagName}[^>]*>([^<]+)<\\/[^>]*${tagName}>`, "i");
+  const match = xml.match(regex);
+  return match ? match[1].trim() : null;
+};
+
 export default {
   async fetch(request, env, ctx) {
     const STORAGE_PREFIX = "prices_";
     const url = new URL(request.url);
     if (url.pathname === '/favicon.ico') return new Response(null, { status: 204 });
 
-    // --- POST HANDLING (Ongewijzigd, want werkt goed) ---
+    // --- POST HANDLING ---
     if (request.method === "POST") {
       const contentLength = request.headers.get("content-length");
+      // Zero-Length Guard: Altijd 200 OK bij heartbeat
       if (contentLength === "0") return new Response("OK", { status: 200 });
 
       let xmlData = "";
+      // Default fallback ACK data
       let ackData = { mrid: "unknown", sender: "10X1001A1001A450", senderRole: "A32", receiver: env.MY_EIC_CODE || "37XPBTH-DUMMY-1", receiverRole: "A39" };
 
       try {
         xmlData = await request.text();
-        const mridMatch = xmlData.match(/<[^>]*mRID[^>]*>([^<]+)<\/[^>]*mRID>/);
-        if (mridMatch) ackData.mrid = mridMatch[1];
+        
+        // Data extractie voor ACK (Mirroring)
+        const mrid = getTagValue(xmlData, "mRID");
+        if (mrid) ackData.mrid = mrid;
 
-        const senderMatch = xmlData.match(/<[^>]*sender_MarketParticipant\.mRID[^>]*>([^<]+)<\/[^>]*sender_MarketParticipant\.mRID>/);
-        const senderRoleMatch = xmlData.match(/<[^>]*sender_MarketParticipant\.marketRole\.type[^>]*>([^<]+)<\/[^>]*sender_MarketParticipant\.marketRole\.type>/);
-        if (senderMatch) ackData.receiver = senderMatch[1];
-        if (senderRoleMatch) ackData.receiverRole = senderRoleMatch[1];
+        const sender = getTagValue(xmlData, "sender_MarketParticipant.mRID");
+        const senderRole = getTagValue(xmlData, "sender_MarketParticipant.marketRole.type");
+        if (sender) ackData.receiver = sender;
+        if (senderRole) ackData.receiverRole = senderRole;
 
-        const receiverMatch = xmlData.match(/<[^>]*receiver_MarketParticipant\.mRID[^>]*>([^<]+)<\/[^>]*receiver_MarketParticipant\.mRID>/);
-        const receiverRoleMatch = xmlData.match(/<[^>]*receiver_MarketParticipant\.marketRole\.type[^>]*>([^<]+)<\/[^>]*receiver_MarketParticipant\.marketRole\.type>/);
-        if (receiverMatch) ackData.sender = receiverMatch[1];
-        if (receiverRoleMatch) ackData.senderRole = receiverRoleMatch[1];
+        const receiver = getTagValue(xmlData, "receiver_MarketParticipant.mRID");
+        const receiverRole = getTagValue(xmlData, "receiver_MarketParticipant.marketRole.type");
+        if (receiver) ackData.sender = receiver;
+        if (receiverRole) ackData.senderRole = receiverRole;
 
+        // Async Processing (Prijzen opslaan)
         if (xmlData.length > 50) {
           ctx.waitUntil((async () => {
             try {
-              const zoneEic = xmlData.match(/<[^>]*out_Domain\.mRID[^>]*>([^<]+)<\/[^>]*out_Domain\.mRID>/)?.[1] || "UNKNOWN";
-              const sequence = xmlData.match(/<[^>]*order_Detail\.nRID>(\d+)<\/[^>]*order_Detail\.nRID>/)?.[1] || "1";
-              const nameMatch = xmlData.match(/<[^>]*out_Domain\.name[^>]*>([^<]+)<\/[^>]*out_Domain\.name>/);
-              const zoneName = ZONE_NAMES[zoneEic] || (nameMatch ? nameMatch[1] : zoneEic);
-              const currency = xmlData.match(/<[^>]*currency_Unit\.name>([^<]+)<\/[^>]*currency_Unit\.name>/)?.[1] || "EUR";
-              const resolutionRaw = xmlData.match(/<[^>]*resolution>([^<]+)<\/[^>]*resolution>/)?.[1] || "PT60M";
-              const startMatch = xmlData.match(/<[^>]*start>([^<]+)<\/[^>]*start>/);
+              const zoneEic = getTagValue(xmlData, "out_Domain.mRID") || "UNKNOWN";
+              const sequenceRaw = getTagValue(xmlData, "order_Detail.nRID") || "1";
+              const zoneNameRaw = getTagValue(xmlData, "out_Domain.name");
+              const zoneName = ZONE_NAMES[zoneEic] || zoneNameRaw || zoneEic;
+              const currency = getTagValue(xmlData, "currency_Unit.name") || "EUR";
+              const resolutionRaw = getTagValue(xmlData, "resolution") || "PT60M";
+              const startRaw = getTagValue(xmlData, "start");
               
-              if (startMatch) {
-                const startTime = new Date(startMatch[1]);
+              if (startRaw) {
+                const startTime = new Date(startRaw);
                 const resMin = resolutionRaw.includes("PT15M") ? 15 : 60;
                 const newPrices = [];
+                // Robuuste Point Regex (flexibeler met witruimte)
                 const pointRegex = /<[^>]*Point>[\s\S]*?<[^>]*position>(\d+)<\/[^>]*position>[\s\S]*?<[^>]*price\.amount>([\d.]+)<\/[^>]*price\.amount>[\s\S]*?<\/[^>]*Point>/g;
                 let match;
                 while ((match = pointRegex.exec(xmlData)) !== null) {
@@ -81,34 +94,62 @@ export default {
                   const storageKey = STORAGE_PREFIX + zoneEic;
                   const existing = await env.PBTH_STORAGE.getWithMetadata(storageKey);
                   const existingPrices = existing.value ? JSON.parse(existing.value) : [];
-                  const existingSeq = existing.metadata?.seq || "0";
+                  
+                  // AUDIT FIX: Sequence Logic (Hogere seq wint, gelijke seq overschrijft)
+                  const existingSeq = parseInt(existing.metadata?.seq || "0");
+                  const incomingSeq = parseInt(sequenceRaw);
 
-                  if (sequence === "1" || existingPrices.length === 0 || existingSeq === "2") {
+                  if (incomingSeq >= existingSeq || existingPrices.length === 0) {
                     const priceMap = new Map(existingPrices.map(obj => [obj.time, obj.price]));
                     newPrices.forEach(item => priceMap.set(item.time, item.price));
+                    
+                    // 48h Pruning
                     const pruneLimit = new Date(Date.now() - 48 * 3600 * 1000).toISOString();
                     const sortedPrices = Array.from(priceMap, ([time, price]) => ({ time, price }))
                                              .filter(item => item.time >= pruneLimit)
                                              .sort((a, b) => new Date(a.time) - new Date(b.time));
 
                     const now = new Date().toISOString();
-                    const metadata = { updated: now, name: zoneName, count: sortedPrices.length, currency, unit: "MWh", res: resMin, seq: sequence, latest: sortedPrices[sortedPrices.length - 1].time };
+                    // Zorg dat latest correct wordt berekend uit de gesorteerde data
+                    const latestTime = sortedPrices.length > 0 ? sortedPrices[sortedPrices.length - 1].time : now;
+
+                    const metadata = { 
+                      updated: now, 
+                      name: zoneName, 
+                      count: sortedPrices.length, 
+                      currency, 
+                      unit: "MWh", 
+                      res: resMin, 
+                      seq: incomingSeq.toString(), 
+                      latest: latestTime 
+                    };
+
                     await env.PBTH_STORAGE.put(storageKey, JSON.stringify(sortedPrices), { metadata });
                     await env.PBTH_STORAGE.put("bridge_last_update", now);
-                    if (env.HOMEY_WEBHOOK_URL) await fetch(env.HOMEY_WEBHOOK_URL, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ zone: zoneEic, name: zoneName, updated: now, data: sortedPrices }) }).catch(() => {});
+                    
+                    if (env.HOMEY_WEBHOOK_URL) {
+                        await fetch(env.HOMEY_WEBHOOK_URL, { 
+                            method: 'POST', 
+                            headers: { 'Content-Type': 'application/json' }, 
+                            body: JSON.stringify({ zone: zoneEic, name: zoneName, updated: now, data: sortedPrices }) 
+                        }).catch(() => {});
+                    }
+                  } else {
+                    console.log(`Update ignored: Incoming seq ${incomingSeq} < Existing seq ${existingSeq}`);
                   }
                 }
               }
-            } catch (e) { console.error("Async error ignored"); }
+            } catch (e) { console.error("Async processing error:", e); }
           })());
         }
         return new Response(this.generateAck(ackData), { status: 200, headers: { "Content-Type": "application/xml" } });
       } catch (err) {
+        console.error("Fatal handler error:", err);
         return new Response(this.generateAck(ackData), { status: 200, headers: { "Content-Type": "application/xml" } });
       }
     }
 
-    // --- GET & STATUS HANDLING (Fixed Health Logic) ---
+    // --- GET & STATUS HANDLING ---
     const isAuthEnabled = env.AUTH_KEY && env.AUTH_KEY.trim().length > 0;
     if (isAuthEnabled) {
       const key = url.searchParams.get("key") || request.headers.get("X-API-Key");
@@ -119,18 +160,16 @@ export default {
       const list = await env.PBTH_STORAGE.list({ prefix: STORAGE_PREFIX });
       const lastUpdate = await env.PBTH_STORAGE.get("bridge_last_update") || "N/A";
       const targetTime = new Date();
-      targetTime.setUTCHours(23, 0, 0, 0); // Vandaag 23:00 UTC
+      targetTime.setUTCHours(23, 0, 0, 0);
 
       const zones = list.keys.map(k => {
         let isComplete = false;
         if (k.metadata?.latest) {
           const latestDate = new Date(k.metadata.latest);
           const resMinutes = k.metadata.res || 60;
-          // Tel resolutie op bij laatste punt om de EINDTIJD te krijgen
           const endTime = new Date(latestDate.getTime() + resMinutes * 60000);
           isComplete = endTime >= targetTime;
         }
-
         const eic = k.name.replace(STORAGE_PREFIX, "");
         return { 
           zone: eic, 
@@ -144,9 +183,8 @@ export default {
           curr: k.metadata?.currency || "EUR" 
         };
       });
-      
       const health = zones.length > 0 ? Math.round((zones.filter(z => z.is_complete_today).length / zones.length) * 100) : 0;
-      return new Response(JSON.stringify({ bridge: "PBTH Energy Bridge Pro", summary: { total_zones: zones.length, health_score: `${health}%`, last_push: lastUpdate }, zones: zones.sort((a,b) => a.zone.localeCompare(b.zone)) }, null, 2), { headers: { "Content-Type": "application/json" } });
+      return new Response(JSON.stringify({ bridge: "PBTH Energy Bridge Pro (v3.0)", summary: { total_zones: zones.length, health_score: `${health}%`, last_push: lastUpdate }, zones: zones.sort((a,b) => a.zone.localeCompare(b.zone)) }, null, 2), { headers: { "Content-Type": "application/json" } });
     }
 
     const zone = url.searchParams.get("zone");
@@ -155,7 +193,7 @@ export default {
       if (!value) return new Response(JSON.stringify({ error: "Zone not found" }), { status: 404 });
       return new Response(JSON.stringify({ zone, name: metadata?.name || ZONE_NAMES[zone] || "N/A", updated: metadata?.updated, points: metadata?.count, res: `${metadata?.res}m`, data: JSON.parse(value) }, null, 2), { headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*", "Cache-Control": "public, max-age=300" } });
     }
-    return new Response("PBTH Bridge Online.", { status: 200 });
+    return new Response("PBTH Bridge Online v3.0", { status: 200 });
   },
 
   generateAck(data) {
@@ -163,3 +201,4 @@ export default {
     return `<?xml version="1.0" encoding="UTF-8"?><Acknowledgement_MarketDocument xmlns="urn:iec62325.351:tc57wg16:451-1:acknowledgementdocument:7:0"><mRID>${crypto.randomUUID()}</mRID><createdDateTime>${time}</createdDateTime><sender_MarketParticipant.mRID codingScheme="A01">${data.sender}</sender_MarketParticipant.mRID><sender_MarketParticipant.marketRole.type>${data.senderRole}</sender_MarketParticipant.marketRole.type><receiver_MarketParticipant.mRID codingScheme="A01">${data.receiver}</receiver_MarketParticipant.mRID><receiver_MarketParticipant.marketRole.type>${data.receiverRole}</receiver_MarketParticipant.marketRole.type><received_MarketDocument.mRID>${data.mrid}</received_MarketDocument.mRID><reason><code>A01</code></reason></Acknowledgement_MarketDocument>`.trim();
   }
 };
+
