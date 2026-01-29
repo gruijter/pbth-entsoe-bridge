@@ -1,6 +1,7 @@
 /**
- * Power by the Hour - ENTSO-E Energy Bridge (v3.1)
- * * GET /?zone=[EIC_CODE]&key=[AUTH_KEY]
+ * Power by the Hour - ENTSO-E Energy Bridge (v3.2)
+ *
+ * GET /?zone=[EIC_CODE]&key=[AUTH_KEY]
  * GET /?status=true&key=[AUTH_KEY]
  * GET /?delete=[EIC_CODE]&key=[AUTH_KEY]
  * HOMEY WEBHOOK POST
@@ -24,7 +25,7 @@ const ZONE_NAMES = {
   "10Y1001A1001A73I": "Italy North", "10YGR-HTSO-----Y": "Greece", "10Y1001A1001A59C": "Germany (Amprion Area)"
 };
 
-// Helper voor robuuste XML extractie (ongevoelig voor witruimte)
+// Helper for robust XML extraction (insensitive to whitespace and attributes)
 const getTagValue = (xml, tagName) => {
   const regex = new RegExp(`<[^>]*${tagName}[^>]*>([^<]+)<\\/[^>]*${tagName}>`, "i");
   const match = xml.match(regex);
@@ -51,10 +52,11 @@ export default {
       try {
         const contentLength = request.headers.get("content-length");
         
+        // If content exists, try to parse for better ACK
         if (contentLength && contentLength !== "0") {
             const xmlData = await request.text();
             
-            // Mirror logic voor ACK
+            // Mirror logic for ACK
             const mrid = getTagValue(xmlData, "mRID");
             if (mrid) ackData.mrid = mrid;
             const sender = getTagValue(xmlData, "sender_MarketParticipant.mRID");
@@ -66,15 +68,17 @@ export default {
             if (receiver) ackData.sender = receiver;
             if (receiverRole) ackData.senderRole = receiverRole;
 
+            // Only start processing if valid XML length
             if (xmlData.length > 50) {
               ctx.waitUntil(this.processData(xmlData, env, STORAGE_PREFIX));
             }
         }
-        // ALTIJD XML terugsturen
+        // ALWAYS return XML, even for empty pings
         return new Response(this.generateAck(ackData), { status: 200, headers: { "Content-Type": "application/xml" } });
 
       } catch (err) {
         console.error("Handler error:", err);
+        // Fallback ACK in case of errors
         return new Response(this.generateAck(ackData), { status: 200, headers: { "Content-Type": "application/xml" } });
       }
     }
@@ -86,7 +90,7 @@ export default {
       if (key !== env.AUTH_KEY.trim()) return new Response("Unauthorized", { status: 401 });
     }
 
-    // 1. DELETE logic (Nieuw!)
+    // 1. DELETE logic
     if (url.searchParams.has("delete")) {
         const zoneToDelete = url.searchParams.get("delete");
         await env.PBTH_STORAGE.delete(STORAGE_PREFIX + zoneToDelete);
@@ -108,6 +112,7 @@ export default {
         if (k.metadata?.latest) {
           const latestDate = new Date(k.metadata.latest);
           const resMinutes = k.metadata.res || 60;
+          // Correct end time calculation for health check
           const endTime = new Date(latestDate.getTime() + resMinutes * 60000);
           isComplete = endTime >= targetTime;
         }
@@ -121,7 +126,7 @@ export default {
       });
       const health = zones.length > 0 ? Math.round((zones.filter(z => z.is_complete_today).length / zones.length) * 100) : 0;
       return new Response(JSON.stringify({ 
-          bridge: "PBTH Energy Bridge Pro (v3.0)", 
+          bridge: "PBTH Energy Bridge Pro (v3.2)", 
           summary: { total_zones: zones.length, health_score: `${health}%`, last_push: lastUpdate }, 
           zones: zones.sort((a,b) => a.zone.localeCompare(b.zone)) 
       }, null, 2), { headers: { "Content-Type": "application/json" } });
@@ -148,7 +153,7 @@ export default {
         });
     }
     
-    return new Response("PBTH Energy Bridge v3.0 Online", { status: 200 });
+    return new Response("PBTH Energy Bridge v3.2 Online", { status: 200 });
   },
 
   async processData(xmlData, env, STORAGE_PREFIX) {
@@ -179,6 +184,7 @@ export default {
             const existing = await env.PBTH_STORAGE.getWithMetadata(storageKey);
             const existingPrices = existing.value ? JSON.parse(existing.value) : [];
             
+            // Sequence Check: Overwrite only if new seq >= old seq
             const existingSeq = parseInt(existing.metadata?.seq || "0");
             const incomingSeq = parseInt(sequenceRaw);
 
@@ -186,6 +192,7 @@ export default {
                 const priceMap = new Map(existingPrices.map(obj => [obj.time, obj.price]));
                 newPrices.forEach(item => priceMap.set(item.time, item.price));
                 
+                // 48h Pruning
                 const pruneLimit = new Date(Date.now() - 48 * 3600 * 1000).toISOString();
                 const sortedPrices = Array.from(priceMap, ([time, price]) => ({ time, price }))
                                             .filter(item => item.time >= pruneLimit)
