@@ -1,10 +1,31 @@
 /**
- * Power by the Hour - ENTSO-E Energy Bridge (v3.10 Stable Watchdog)
+ * Power by the Hour - ENTSO-E Energy Bridge (v3.12 Documentation Update)
  *
- * GET /?zone=[EIC_CODE]&key=[AUTH_KEY]
- * GET /?status=true&key=[AUTH_KEY]
- * GET /?delete=[EIC_CODE]&key=[AUTH_KEY]
+ * API ENDPOINTS:
+ * GET /?zone=[EIC_CODE]&key=[AUTH_KEY]     -> Get specific zone prices
+ * GET /?status=true&key=[AUTH_KEY]         -> Get bridge health & stats
+ * GET /?delete=[EIC_CODE]&key=[AUTH_KEY]   -> Delete zone data
+ *
  * CRON: Watchdog checks health + Aggregates stats every 15 mins
+ *
+ * HOMEY WEBHOOK EVENTS (POST):
+ * 1. event: "price_update" (Sent when new prices arrive)
+ * Payload: { 
+ * "event": "price_update", 
+ * "zone": "10YNL...", 
+ * "name": "Netherlands", 
+ * "updated": "2026-01-30T13:00:00Z", 
+ * "data": [{ "time": "...", "price": 12.5 }, ...] 
+ * }
+ *
+ * 2. event: "alert_connection_lost" (Sent by Watchdog after >60 mins silence)
+ * Payload: { 
+ * "event": "alert_connection_lost", 
+ * "message": "Alert: Geen ENTSO-E data ontvangen...", 
+ * "minutes_silence": 65, 
+ * "last_seen": "2026-01-30T10:00:00Z",
+ * "entsoe_service_online": false
+ * }
  */
 
 const ZONE_NAMES = {
@@ -26,6 +47,7 @@ const ZONE_NAMES = {
 };
 
 // GLOBAL MEMORY BUFFER (Resets if worker sleeps, aggregated by Cron)
+// Note: This is per-instance memory. Not shared across multiple workers.
 let requestBuffer = 0;
 
 // Helper for robust XML extraction
@@ -38,7 +60,7 @@ const getTagValue = (xml, tagName) => {
 export default {
   // 1. STANDARD HTTP REQUEST HANDLER
   async fetch(request, env, ctx) {
-    requestBuffer++; // Count every hit in memory
+    requestBuffer++; // Count every hit in memory (flushed by Cron)
     const STORAGE_PREFIX = "prices_";
     const url = new URL(request.url);
 
@@ -95,7 +117,7 @@ export default {
         });
     }
 
-    // B. STATUS logic (v3.10)
+    // B. STATUS logic (v3.12 Stable Display)
     if (url.searchParams.has("status")) {
       const list = await env.PBTH_STORAGE.list({ prefix: STORAGE_PREFIX });
       const lastUpdateRaw = await env.PBTH_STORAGE.get("bridge_last_update") || "N/A";
@@ -103,10 +125,11 @@ export default {
       // Load Stats
       let stats = await env.PBTH_STORAGE.get("bridge_stats_daily", { type: "json" }) || { date: "", requests: 0, writes: 0 };
       
-      const currentTotalRequests = (stats.requests || 0) + requestBuffer;
+      // Stable Stats (Only persisted KV data)
+      const currentTotalRequests = (stats.requests || 0);
       const currentTotalWrites = (stats.writes || 0);
 
-      // Service Status (Threshold increased to 60 mins)
+      // Service Status (60 min threshold)
       let entsoeServiceOnline = false;
       if (lastUpdateRaw !== "N/A") {
           const lastUpdateDate = new Date(lastUpdateRaw);
@@ -144,7 +167,7 @@ export default {
       const writePercent = ((currentTotalWrites / 1000) * 100).toFixed(2) + "%";
 
       return new Response(JSON.stringify({ 
-          bridge: "PBTH Energy Bridge Pro (v3.10)", 
+          bridge: "PBTH Energy Bridge Pro (v3.12)", 
           summary: { 
               total_zones: zones.length, 
               complete_today: Number(ratioToday.toFixed(2)),
@@ -157,7 +180,7 @@ export default {
               requests_quota_used: reqPercent,
               kv_writes_today: currentTotalWrites,
               writes_quota_used: writePercent,
-              note: "Resets at 00:00 UTC"
+              note: "Updates every 15 mins (Stable). Resets at 00:00 UTC"
           },
           zones: zones.sort((a,b) => a.zone.localeCompare(b.zone)) 
       }, null, 2), { headers: { "Content-Type": "application/json" } });
@@ -174,7 +197,7 @@ export default {
         }, null, 2), { headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*", "Cache-Control": "public, max-age=300" } });
     }
     
-    return new Response("PBTH Energy Bridge v3.10 Online", { status: 200 });
+    return new Response("PBTH Energy Bridge v3.12 Online", { status: 200 });
   },
 
   // 2. CRON SCHEDULED HANDLER (Watchdog & Stats Aggregator)
@@ -186,12 +209,14 @@ export default {
     if (stats.date !== todayStr) {
         stats = { date: todayStr, requests: 0, writes: 0 };
     }
+    // Flush the local buffer of THIS instance to the DB
     stats.requests += requestBuffer;
     stats.writes += 1;
+    
     await env.PBTH_STORAGE.put("bridge_stats_daily", JSON.stringify(stats));
-    requestBuffer = 0;
+    requestBuffer = 0; // Reset local buffer
 
-    // B. WATCHDOG (Threshold increased to 60 mins)
+    // B. WATCHDOG (60 min threshold)
     const lastUpdateRaw = await env.PBTH_STORAGE.get("bridge_last_update");
     if (!lastUpdateRaw) return;
 
@@ -199,7 +224,6 @@ export default {
     const diffMs = new Date() - lastUpdate;
     const diffMinutes = Math.floor(diffMs / 60000);
 
-    // CHANGED: 30 -> 60 minutes
     if (diffMinutes > 60 && env.HOMEY_WEBHOOK_URL) {
         console.log(`WATCHDOG ALERT: No data for ${diffMinutes} minutes.`);
         await fetch(env.HOMEY_WEBHOOK_URL, { 
