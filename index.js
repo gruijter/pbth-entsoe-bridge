@@ -1,31 +1,14 @@
 /**
- * Power by the Hour - ENTSO-E Energy Bridge (v3.12 Documentation Update)
+ * Power by the Hour - ENTSO-E Energy Bridge (v3.14 Smart Sampling)
  *
  * API ENDPOINTS:
  * GET /?zone=[EIC_CODE]&key=[AUTH_KEY]     -> Get specific zone prices
  * GET /?status=true&key=[AUTH_KEY]         -> Get bridge health & stats
  * GET /?delete=[EIC_CODE]&key=[AUTH_KEY]   -> Delete zone data
  *
- * CRON: Watchdog checks health + Aggregates stats every 15 mins
- *
- * HOMEY WEBHOOK EVENTS (POST):
- * 1. event: "price_update" (Sent when new prices arrive)
- * Payload: { 
- * "event": "price_update", 
- * "zone": "10YNL...", 
- * "name": "Netherlands", 
- * "updated": "2026-01-30T13:00:00Z", 
- * "data": [{ "time": "...", "price": 12.5 }, ...] 
- * }
- *
- * 2. event: "alert_connection_lost" (Sent by Watchdog after >60 mins silence)
- * Payload: { 
- * "event": "alert_connection_lost", 
- * "message": "Alert: Geen ENTSO-E data ontvangen...", 
- * "minutes_silence": 65, 
- * "last_seen": "2026-01-30T10:00:00Z",
- * "entsoe_service_online": false
- * }
+ * STATISTICS STRATEGY:
+ * Smart Sampling (1 in 10) is used to bypass Cloudflare Free Plan Write Limits (1000/day).
+ * This allows counting up to ~10,000 requests/day while only writing ~1,000 times.
  */
 
 const ZONE_NAMES = {
@@ -46,9 +29,8 @@ const ZONE_NAMES = {
   "10Y1001A1001A73I": "Italy North", "10YGR-HTSO-----Y": "Greece", "10Y1001A1001A59C": "Germany (Amprion Area)"
 };
 
-// GLOBAL MEMORY BUFFER (Resets if worker sleeps, aggregated by Cron)
-// Note: This is per-instance memory. Not shared across multiple workers.
-let requestBuffer = 0;
+// CONFIGURATION
+const SAMPLE_RATE = 10; // Only write 1 in 10 requests to DB (Multiply count by 10)
 
 // Helper for robust XML extraction
 const getTagValue = (xml, tagName) => {
@@ -57,14 +39,45 @@ const getTagValue = (xml, tagName) => {
   return match ? match[1].trim() : null;
 };
 
+// Helper to update stats with Sampling Strategy
+async function updateStats(env) {
+    // RANDOM SAMPLING: Only proceed 10% of the time (approx)
+    // This reduces DB Writes by 90%, allowing 10x more traffic measurement.
+    if (Math.random() > (1 / SAMPLE_RATE)) {
+        return Promise.resolve(); // Do nothing (save quota)
+    }
+
+    const todayStr = new Date().toISOString().split('T')[0];
+    let stats = await env.PBTH_STORAGE.get("bridge_stats_daily", { type: "json" }) || { date: todayStr, requests: 0, writes: 0 };
+    
+    // Reset if new day (UTC Midnight)
+    if (stats.date !== todayStr) {
+        stats = { date: todayStr, requests: 0, writes: 0 };
+    }
+
+    // Since we only run 1 in 10 times, we add 10 to the counter!
+    stats.requests += SAMPLE_RATE;
+
+    // Safety Cap: Stop writing if we hit 950 writes (Free plan limit is 1000)
+    // With sampling, this supports up to ~9,500 requests/day.
+    if (stats.writes < 950) {
+        stats.writes++;
+        return env.PBTH_STORAGE.put("bridge_stats_daily", JSON.stringify(stats));
+    } else {
+        return Promise.resolve(); 
+    }
+}
+
 export default {
   // 1. STANDARD HTTP REQUEST HANDLER
   async fetch(request, env, ctx) {
-    requestBuffer++; // Count every hit in memory (flushed by Cron)
     const STORAGE_PREFIX = "prices_";
     const url = new URL(request.url);
 
     if (url.pathname === '/favicon.ico') return new Response(null, { status: 204 });
+
+    // UPDATE STATS (Fire and forget via waitUntil)
+    ctx.waitUntil(updateStats(env));
 
     // --- POST HANDLING (ENTSO-E PUSH) ---
     if (request.method === "POST") {
@@ -117,18 +130,14 @@ export default {
         });
     }
 
-    // B. STATUS logic (v3.12 Stable Display)
+    // B. STATUS logic (v3.14 Smart Sampling)
     if (url.searchParams.has("status")) {
       const list = await env.PBTH_STORAGE.list({ prefix: STORAGE_PREFIX });
       const lastUpdateRaw = await env.PBTH_STORAGE.get("bridge_last_update") || "N/A";
       
-      // Load Stats
+      // Load Stats (Directly from DB)
       let stats = await env.PBTH_STORAGE.get("bridge_stats_daily", { type: "json" }) || { date: "", requests: 0, writes: 0 };
       
-      // Stable Stats (Only persisted KV data)
-      const currentTotalRequests = (stats.requests || 0);
-      const currentTotalWrites = (stats.writes || 0);
-
       // Service Status (60 min threshold)
       let entsoeServiceOnline = false;
       if (lastUpdateRaw !== "N/A") {
@@ -162,12 +171,12 @@ export default {
       const ratioToday = zones.length > 0 ? (zones.filter(z => z.is_complete_today).length / zones.length) : 0;
       const ratioTomorrow = zones.length > 0 ? (zones.filter(z => z.is_complete_tomorrow).length / zones.length) : 0;
       
-      // Calc usage percentages (Free Plan Limits: 100k Requests, 1k Writes)
-      const reqPercent = ((currentTotalRequests / 100000) * 100).toFixed(2) + "%";
-      const writePercent = ((currentTotalWrites / 1000) * 100).toFixed(2) + "%";
+      const reqPercent = ((stats.requests / 100000) * 100).toFixed(2) + "%";
+      const writePercent = ((stats.writes / 1000) * 100).toFixed(2) + "%";
+      const quotaLimited = stats.writes >= 950;
 
       return new Response(JSON.stringify({ 
-          bridge: "PBTH Energy Bridge Pro (v3.12)", 
+          bridge: "PBTH Energy Bridge Pro (v3.14)", 
           summary: { 
               total_zones: zones.length, 
               complete_today: Number(ratioToday.toFixed(2)),
@@ -176,11 +185,13 @@ export default {
               last_push: lastUpdateRaw 
           },
           usage: {
-              requests_today: currentTotalRequests,
+              estimated_requests_today: stats.requests,
               requests_quota_used: reqPercent,
-              kv_writes_today: currentTotalWrites,
+              kv_writes_today: stats.writes,
               writes_quota_used: writePercent,
-              note: "Updates every 15 mins (Stable). Resets at 00:00 UTC"
+              sampling_mode: "1 in " + SAMPLE_RATE,
+              quota_protection_active: quotaLimited,
+              note: "Counter updates in steps of 10. Resets at 00:00 UTC"
           },
           zones: zones.sort((a,b) => a.zone.localeCompare(b.zone)) 
       }, null, 2), { headers: { "Content-Type": "application/json" } });
@@ -197,26 +208,11 @@ export default {
         }, null, 2), { headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*", "Cache-Control": "public, max-age=300" } });
     }
     
-    return new Response("PBTH Energy Bridge v3.12 Online", { status: 200 });
+    return new Response("PBTH Energy Bridge v3.14 Online", { status: 200 });
   },
 
-  // 2. CRON SCHEDULED HANDLER (Watchdog & Stats Aggregator)
+  // 2. CRON SCHEDULED HANDLER (Watchdog ONLY)
   async scheduled(event, env, ctx) {
-    // A. STATS AGGREGATION
-    const todayStr = new Date().toISOString().split('T')[0];
-    let stats = await env.PBTH_STORAGE.get("bridge_stats_daily", { type: "json" }) || { date: todayStr, requests: 0, writes: 0 };
-    
-    if (stats.date !== todayStr) {
-        stats = { date: todayStr, requests: 0, writes: 0 };
-    }
-    // Flush the local buffer of THIS instance to the DB
-    stats.requests += requestBuffer;
-    stats.writes += 1;
-    
-    await env.PBTH_STORAGE.put("bridge_stats_daily", JSON.stringify(stats));
-    requestBuffer = 0; // Reset local buffer
-
-    // B. WATCHDOG (60 min threshold)
     const lastUpdateRaw = await env.PBTH_STORAGE.get("bridge_last_update");
     if (!lastUpdateRaw) return;
 
