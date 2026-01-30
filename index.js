@@ -1,10 +1,10 @@
 /**
- * Power by the Hour - ENTSO-E Energy Bridge (v3.4)
+ * Power by the Hour - ENTSO-E Energy Bridge (v3.6)
  *
  * GET /?zone=[EIC_CODE]&key=[AUTH_KEY]
  * GET /?status=true&key=[AUTH_KEY]
  * GET /?delete=[EIC_CODE]&key=[AUTH_KEY]
- * CRON: Watchdog checks health every 30 mins
+ * CRON: Watchdog checks health every 15 mins (Alerts Homey after 30 mins silence)
  */
 
 const ZONE_NAMES = {
@@ -53,33 +53,24 @@ export default {
       try {
         const contentLength = request.headers.get("content-length");
         
-        // If content exists, try to parse for better ACK
         if (contentLength && contentLength !== "0") {
             const xmlData = await request.text();
             
             // Mirror logic for ACK
-            const mrid = getTagValue(xmlData, "mRID");
-            if (mrid) ackData.mrid = mrid;
-            const sender = getTagValue(xmlData, "sender_MarketParticipant.mRID");
-            const senderRole = getTagValue(xmlData, "sender_MarketParticipant.marketRole.type");
-            if (sender) ackData.receiver = sender;
-            if (senderRole) ackData.receiverRole = senderRole;
-            const receiver = getTagValue(xmlData, "receiver_MarketParticipant.mRID");
-            const receiverRole = getTagValue(xmlData, "receiver_MarketParticipant.marketRole.type");
-            if (receiver) ackData.sender = receiver;
-            if (receiverRole) ackData.senderRole = receiverRole;
+            const mrid = getTagValue(xmlData, "mRID"); if (mrid) ackData.mrid = mrid;
+            const sender = getTagValue(xmlData, "sender_MarketParticipant.mRID"); if (sender) ackData.receiver = sender;
+            const senderRole = getTagValue(xmlData, "sender_MarketParticipant.marketRole.type"); if (senderRole) ackData.receiverRole = senderRole;
+            const receiver = getTagValue(xmlData, "receiver_MarketParticipant.mRID"); if (receiver) ackData.sender = receiver;
+            const receiverRole = getTagValue(xmlData, "receiver_MarketParticipant.marketRole.type"); if (receiverRole) ackData.senderRole = receiverRole;
 
-            // Only start processing if valid XML length
             if (xmlData.length > 50) {
               ctx.waitUntil(this.processData(xmlData, env, STORAGE_PREFIX));
             }
         }
-        // ALWAYS return XML, even for empty pings
         return new Response(this.generateAck(ackData), { status: 200, headers: { "Content-Type": "application/xml" } });
 
       } catch (err) {
         console.error("Handler error:", err);
-        // Fallback ACK in case of errors
         return new Response(this.generateAck(ackData), { status: 200, headers: { "Content-Type": "application/xml" } });
       }
     }
@@ -96,15 +87,25 @@ export default {
         const zoneToDelete = url.searchParams.get("delete");
         await env.PBTH_STORAGE.delete(STORAGE_PREFIX + zoneToDelete);
         return new Response(JSON.stringify({ message: `Deleted zone ${zoneToDelete}` }), { 
-            status: 200, 
-            headers: { "Content-Type": "application/json" } 
+            status: 200, headers: { "Content-Type": "application/json" } 
         });
     }
 
-    // B. STATUS logic
+    // B. STATUS logic (UPDATED v3.6)
     if (url.searchParams.has("status")) {
       const list = await env.PBTH_STORAGE.list({ prefix: STORAGE_PREFIX });
-      const lastUpdate = await env.PBTH_STORAGE.get("bridge_last_update") || "N/A";
+      const lastUpdateRaw = await env.PBTH_STORAGE.get("bridge_last_update") || "N/A";
+      
+      // Calculate Service Online Status
+      let entsoeServiceOnline = false;
+      if (lastUpdateRaw !== "N/A") {
+          const lastUpdateDate = new Date(lastUpdateRaw);
+          const diffMs = new Date() - lastUpdateDate;
+          const diffMinutes = Math.floor(diffMs / 60000);
+          // Online if last push was less than 30 minutes ago
+          entsoeServiceOnline = diffMinutes <= 30;
+      }
+
       const targetTime = new Date();
       targetTime.setUTCHours(23, 0, 0, 0);
 
@@ -113,7 +114,6 @@ export default {
         if (k.metadata?.latest) {
           const latestDate = new Date(k.metadata.latest);
           const resMinutes = k.metadata.res || 60;
-          // Correct end time calculation for health check
           const endTime = new Date(latestDate.getTime() + resMinutes * 60000);
           isComplete = endTime >= targetTime;
         }
@@ -125,10 +125,19 @@ export default {
           res: `${k.metadata?.res || 60}m`, seq: k.metadata?.seq || "1", curr: k.metadata?.currency || "EUR" 
         };
       });
-      const health = zones.length > 0 ? Math.round((zones.filter(z => z.is_complete_today).length / zones.length) * 100) : 0;
+
+      // Calculate Completion Ratio (Number, 2 decimals)
+      const ratio = zones.length > 0 ? (zones.filter(z => z.is_complete_today).length / zones.length) : 0;
+      const completeToday = Number(ratio.toFixed(2));
+
       return new Response(JSON.stringify({ 
-          bridge: "PBTH Energy Bridge Pro (v3.4)", 
-          summary: { total_zones: zones.length, health_score: `${health}%`, last_push: lastUpdate }, 
+          bridge: "PBTH Energy Bridge Pro (v3.6)", 
+          summary: { 
+              total_zones: zones.length, 
+              complete_today: completeToday, 
+              entsoe_service_online: entsoeServiceOnline,
+              last_push: lastUpdateRaw 
+          }, 
           zones: zones.sort((a,b) => a.zone.localeCompare(b.zone)) 
       }, null, 2), { headers: { "Content-Type": "application/json" } });
     }
@@ -139,47 +148,47 @@ export default {
         const { value, metadata } = await env.PBTH_STORAGE.getWithMetadata(STORAGE_PREFIX + zone);
         if (!value) return new Response(JSON.stringify({ error: "Zone not found" }), { status: 404 });
         return new Response(JSON.stringify({ 
-            zone, 
-            name: metadata?.name || ZONE_NAMES[zone] || "N/A", 
-            updated: metadata?.updated, 
-            points: metadata?.count, 
-            res: `${metadata?.res}m`, 
-            data: JSON.parse(value) 
+            zone, name: metadata?.name || ZONE_NAMES[zone] || "N/A", 
+            updated: metadata?.updated, points: metadata?.count, res: `${metadata?.res}m`, data: JSON.parse(value) 
         }, null, 2), { 
-            headers: { 
-                "Content-Type": "application/json", 
-                "Access-Control-Allow-Origin": "*", 
-                "Cache-Control": "public, max-age=300" 
-            } 
+            headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*", "Cache-Control": "public, max-age=300" } 
         });
     }
     
-    return new Response("PBTH Energy Bridge v3.4 Online", { status: 200 });
+    return new Response("PBTH Energy Bridge v3.6 Online", { status: 200 });
   },
 
-  // 2. CRON SCHEDULED HANDLER (Watchdog)
-  // Requires [triggers] crons = ["*/30 * * * *"] in wrangler.toml
+  // 2. CRON SCHEDULED HANDLER (Watchdog) -> Homey Alert
+  // Requires [triggers] crons = ["*/15 * * * *"] in wrangler.toml
   async scheduled(event, env, ctx) {
     const lastUpdateRaw = await env.PBTH_STORAGE.get("bridge_last_update");
-    if (!lastUpdateRaw) return; // No data yet
+    if (!lastUpdateRaw) return;
 
     const lastUpdate = new Date(lastUpdateRaw);
     const now = new Date();
     const diffMs = now - lastUpdate;
     const diffMinutes = Math.floor(diffMs / 60000);
 
-    // THRESHOLD: 60 minutes silence = Connection Lost
-    if (diffMinutes > 60) {
-        const errorMsg = `CRITICAL ALERT: No ENTSO-E data received for ${diffMinutes} minutes! Last update: ${lastUpdateRaw}. Check ENTSO-E Portal status.`;
+    // THRESHOLD: 30 minutes silence (Changed in v3.6)
+    if (diffMinutes > 30 && env.HOMEY_WEBHOOK_URL) {
+        console.log(`WATCHDOG ALERT: No data for ${diffMinutes} minutes.`);
         
-        console.error(errorMsg);
-        
-        // This ERROR will trigger Cloudflare Notifications (Email)
-        throw new Error(errorMsg);
+        // POST to Homey
+        await fetch(env.HOMEY_WEBHOOK_URL, { 
+            method: 'POST', 
+            headers: { 'Content-Type': 'application/json' }, 
+            body: JSON.stringify({ 
+                event: "alert_connection_lost", 
+                message: `Alert: Geen ENTSO-E data ontvangen gedurende ${diffMinutes} minuten!`,
+                last_seen: lastUpdateRaw,
+                minutes_silence: diffMinutes,
+                entsoe_service_online: false
+            }) 
+        }).catch(err => console.error("Failed to alert Homey:", err));
     }
   },
 
-  // 3. DATA PROCESSING HELPER
+  // 3. DATA PROCESSING
   async processData(xmlData, env, STORAGE_PREFIX) {
     try {
         const zoneEic = getTagValue(xmlData, "out_Domain.mRID") || "UNKNOWN";
@@ -196,7 +205,6 @@ export default {
         const resMin = resolutionRaw.includes("PT15M") ? 15 : 60;
         const newPrices = [];
         const pointRegex = /<[^>]*Point>[\s\S]*?<[^>]*position>(\d+)<\/[^>]*position>[\s\S]*?<[^>]*price\.amount>([\d.]+)<\/[^>]*price\.amount>[\s\S]*?<\/[^>]*Point>/g;
-        
         let match;
         while ((match = pointRegex.exec(xmlData)) !== null) {
             const timestamp = new Date(startTime.getTime() + (parseInt(match[1]) - 1) * resMin * 60000);
@@ -207,20 +215,14 @@ export default {
             const storageKey = STORAGE_PREFIX + zoneEic;
             const existing = await env.PBTH_STORAGE.getWithMetadata(storageKey);
             const existingPrices = existing.value ? JSON.parse(existing.value) : [];
-            
-            // Sequence Check: Overwrite only if new seq >= old seq
             const existingSeq = parseInt(existing.metadata?.seq || "0");
             const incomingSeq = parseInt(sequenceRaw);
 
             if (incomingSeq >= existingSeq || existingPrices.length === 0) {
                 const priceMap = new Map(existingPrices.map(obj => [obj.time, obj.price]));
                 newPrices.forEach(item => priceMap.set(item.time, item.price));
-                
-                // 48h Pruning
                 const pruneLimit = new Date(Date.now() - 48 * 3600 * 1000).toISOString();
-                const sortedPrices = Array.from(priceMap, ([time, price]) => ({ time, price }))
-                                            .filter(item => item.time >= pruneLimit)
-                                            .sort((a, b) => new Date(a.time) - new Date(b.time));
+                const sortedPrices = Array.from(priceMap, ([time, price]) => ({ time, price })).filter(item => item.time >= pruneLimit).sort((a, b) => new Date(a.time) - new Date(b.time));
 
                 const now = new Date().toISOString();
                 const latestTime = sortedPrices.length > 0 ? sortedPrices[sortedPrices.length - 1].time : now;
@@ -229,12 +231,17 @@ export default {
                 await env.PBTH_STORAGE.put(storageKey, JSON.stringify(sortedPrices), { metadata });
                 await env.PBTH_STORAGE.put("bridge_last_update", now);
                 
-                // Still send Webhook to Homey for data updates (if configured)
                 if (env.HOMEY_WEBHOOK_URL) {
                     await fetch(env.HOMEY_WEBHOOK_URL, { 
                         method: 'POST', 
                         headers: { 'Content-Type': 'application/json' }, 
-                        body: JSON.stringify({ zone: zoneEic, name: zoneName, updated: now, data: sortedPrices }) 
+                        body: JSON.stringify({ 
+                            event: "price_update", 
+                            zone: zoneEic, 
+                            name: zoneName, 
+                            updated: now, 
+                            data: sortedPrices 
+                        }) 
                     }).catch(() => {});
                 }
             }
@@ -242,19 +249,8 @@ export default {
     } catch (e) { console.error("Async error:", e); }
   },
 
-  // 4. XML ACK GENERATOR
   generateAck(data) {
     const time = new Date().toISOString().split('.')[0] + "Z";
-    return `<?xml version="1.0" encoding="UTF-8"?>
-<Acknowledgement_MarketDocument xmlns="urn:iec62325.351:tc57wg16:451-1:acknowledgementdocument:7:0">
-\t<mRID>${crypto.randomUUID()}</mRID>
-\t<createdDateTime>${time}</createdDateTime>
-\t<sender_MarketParticipant.mRID codingScheme="A01">${data.sender}</sender_MarketParticipant.mRID>
-\t<sender_MarketParticipant.marketRole.type>${data.senderRole}</sender_MarketParticipant.marketRole.type>
-\t<receiver_MarketParticipant.mRID codingScheme="A01">${data.receiver}</receiver_MarketParticipant.mRID>
-\t<receiver_MarketParticipant.marketRole.type>${data.receiverRole}</receiver_MarketParticipant.marketRole.type>
-\t<received_MarketDocument.mRID>${data.mrid}</received_MarketDocument.mRID>
-\t<reason><code >A01</code></reason>
-</Acknowledgement_MarketDocument>`.trim();
+    return `<?xml version="1.0" encoding="UTF-8"?><Acknowledgement_MarketDocument xmlns="urn:iec62325.351:tc57wg16:451-1:acknowledgementdocument:7:0"><mRID>${crypto.randomUUID()}</mRID><createdDateTime>${time}</createdDateTime><sender_MarketParticipant.mRID codingScheme="A01">${data.sender}</sender_MarketParticipant.mRID><sender_MarketParticipant.marketRole.type>${data.senderRole}</sender_MarketParticipant.marketRole.type><receiver_MarketParticipant.mRID codingScheme="A01">${data.receiver}</receiver_MarketParticipant.mRID><receiver_MarketParticipant.marketRole.type>${data.receiverRole}</receiver_MarketParticipant.marketRole.type><received_MarketDocument.mRID>${data.mrid}</received_MarketDocument.mRID><reason><code>A01</code></reason></Acknowledgement_MarketDocument>`.trim();
   }
 };
