@@ -1,10 +1,10 @@
 /**
- * Power by the Hour - ENTSO-E Energy Bridge (v3.2)
+ * Power by the Hour - ENTSO-E Energy Bridge (v3.4)
  *
  * GET /?zone=[EIC_CODE]&key=[AUTH_KEY]
  * GET /?status=true&key=[AUTH_KEY]
  * GET /?delete=[EIC_CODE]&key=[AUTH_KEY]
- * HOMEY WEBHOOK POST
+ * CRON: Watchdog checks health every 30 mins
  */
 
 const ZONE_NAMES = {
@@ -33,6 +33,7 @@ const getTagValue = (xml, tagName) => {
 };
 
 export default {
+  // 1. STANDARD HTTP REQUEST HANDLER
   async fetch(request, env, ctx) {
     const STORAGE_PREFIX = "prices_";
     const url = new URL(request.url);
@@ -90,7 +91,7 @@ export default {
       if (key !== env.AUTH_KEY.trim()) return new Response("Unauthorized", { status: 401 });
     }
 
-    // 1. DELETE logic
+    // A. DELETE logic
     if (url.searchParams.has("delete")) {
         const zoneToDelete = url.searchParams.get("delete");
         await env.PBTH_STORAGE.delete(STORAGE_PREFIX + zoneToDelete);
@@ -100,7 +101,7 @@ export default {
         });
     }
 
-    // 2. STATUS logic
+    // B. STATUS logic
     if (url.searchParams.has("status")) {
       const list = await env.PBTH_STORAGE.list({ prefix: STORAGE_PREFIX });
       const lastUpdate = await env.PBTH_STORAGE.get("bridge_last_update") || "N/A";
@@ -126,13 +127,13 @@ export default {
       });
       const health = zones.length > 0 ? Math.round((zones.filter(z => z.is_complete_today).length / zones.length) * 100) : 0;
       return new Response(JSON.stringify({ 
-          bridge: "PBTH Energy Bridge Pro (v3.2)", 
+          bridge: "PBTH Energy Bridge Pro (v3.4)", 
           summary: { total_zones: zones.length, health_score: `${health}%`, last_push: lastUpdate }, 
           zones: zones.sort((a,b) => a.zone.localeCompare(b.zone)) 
       }, null, 2), { headers: { "Content-Type": "application/json" } });
     }
 
-    // 3. GET ZONE logic
+    // C. GET ZONE logic
     const zone = url.searchParams.get("zone");
     if (zone) {
         const { value, metadata } = await env.PBTH_STORAGE.getWithMetadata(STORAGE_PREFIX + zone);
@@ -153,9 +154,32 @@ export default {
         });
     }
     
-    return new Response("PBTH Energy Bridge v3.2 Online", { status: 200 });
+    return new Response("PBTH Energy Bridge v3.4 Online", { status: 200 });
   },
 
+  // 2. CRON SCHEDULED HANDLER (Watchdog)
+  // Requires [triggers] crons = ["*/30 * * * *"] in wrangler.toml
+  async scheduled(event, env, ctx) {
+    const lastUpdateRaw = await env.PBTH_STORAGE.get("bridge_last_update");
+    if (!lastUpdateRaw) return; // No data yet
+
+    const lastUpdate = new Date(lastUpdateRaw);
+    const now = new Date();
+    const diffMs = now - lastUpdate;
+    const diffMinutes = Math.floor(diffMs / 60000);
+
+    // THRESHOLD: 60 minutes silence = Connection Lost
+    if (diffMinutes > 60) {
+        const errorMsg = `CRITICAL ALERT: No ENTSO-E data received for ${diffMinutes} minutes! Last update: ${lastUpdateRaw}. Check ENTSO-E Portal status.`;
+        
+        console.error(errorMsg);
+        
+        // This ERROR will trigger Cloudflare Notifications (Email)
+        throw new Error(errorMsg);
+    }
+  },
+
+  // 3. DATA PROCESSING HELPER
   async processData(xmlData, env, STORAGE_PREFIX) {
     try {
         const zoneEic = getTagValue(xmlData, "out_Domain.mRID") || "UNKNOWN";
@@ -205,6 +229,7 @@ export default {
                 await env.PBTH_STORAGE.put(storageKey, JSON.stringify(sortedPrices), { metadata });
                 await env.PBTH_STORAGE.put("bridge_last_update", now);
                 
+                // Still send Webhook to Homey for data updates (if configured)
                 if (env.HOMEY_WEBHOOK_URL) {
                     await fetch(env.HOMEY_WEBHOOK_URL, { 
                         method: 'POST', 
@@ -217,6 +242,7 @@ export default {
     } catch (e) { console.error("Async error:", e); }
   },
 
+  // 4. XML ACK GENERATOR
   generateAck(data) {
     const time = new Date().toISOString().split('.')[0] + "Z";
     return `<?xml version="1.0" encoding="UTF-8"?>
