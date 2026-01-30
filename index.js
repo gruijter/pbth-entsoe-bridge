@@ -1,5 +1,5 @@
 /**
- * Power by the Hour - ENTSO-E Energy Bridge (v3.6)
+ * Power by the Hour - ENTSO-E Energy Bridge (v3.7)
  *
  * GET /?zone=[EIC_CODE]&key=[AUTH_KEY]
  * GET /?status=true&key=[AUTH_KEY]
@@ -91,7 +91,7 @@ export default {
         });
     }
 
-    // B. STATUS logic (UPDATED v3.6)
+    // B. STATUS logic (UPDATED v3.7)
     if (url.searchParams.has("status")) {
       const list = await env.PBTH_STORAGE.list({ prefix: STORAGE_PREFIX });
       const lastUpdateRaw = await env.PBTH_STORAGE.get("bridge_last_update") || "N/A";
@@ -102,39 +102,53 @@ export default {
           const lastUpdateDate = new Date(lastUpdateRaw);
           const diffMs = new Date() - lastUpdateDate;
           const diffMinutes = Math.floor(diffMs / 60000);
-          // Online if last push was less than 30 minutes ago
           entsoeServiceOnline = diffMinutes <= 30;
       }
 
-      const targetTime = new Date();
-      targetTime.setUTCHours(23, 0, 0, 0);
+      // Calculate Target Times
+      const todayTarget = new Date();
+      todayTarget.setUTCHours(23, 0, 0, 0);
+
+      const tomorrowTarget = new Date(todayTarget);
+      tomorrowTarget.setDate(tomorrowTarget.getDate() + 1);
 
       const zones = list.keys.map(k => {
-        let isComplete = false;
+        let isCompleteToday = false;
+        let isCompleteTomorrow = false;
+
         if (k.metadata?.latest) {
           const latestDate = new Date(k.metadata.latest);
           const resMinutes = k.metadata.res || 60;
           const endTime = new Date(latestDate.getTime() + resMinutes * 60000);
-          isComplete = endTime >= targetTime;
+          
+          isCompleteToday = endTime >= todayTarget;
+          isCompleteTomorrow = endTime >= tomorrowTarget;
         }
         const eic = k.name.replace(STORAGE_PREFIX, "");
         return { 
-          zone: eic, name: k.metadata?.name || ZONE_NAMES[eic] || "N/A", 
-          updated: k.metadata?.updated || "N/A", latest_data: k.metadata?.latest || "N/A", 
-          is_complete_today: isComplete, points: k.metadata?.count || 0, 
-          res: `${k.metadata?.res || 60}m`, seq: k.metadata?.seq || "1", curr: k.metadata?.currency || "EUR" 
+          zone: eic, 
+          name: k.metadata?.name || ZONE_NAMES[eic] || "N/A", 
+          updated: k.metadata?.updated || "N/A", 
+          latest_data: k.metadata?.latest || "N/A", 
+          is_complete_today: isCompleteToday,
+          is_complete_tomorrow: isCompleteTomorrow, 
+          points: k.metadata?.count || 0, 
+          res: `${k.metadata?.res || 60}m`, 
+          seq: k.metadata?.seq || "1", 
+          curr: k.metadata?.currency || "EUR" 
         };
       });
 
-      // Calculate Completion Ratio (Number, 2 decimals)
-      const ratio = zones.length > 0 ? (zones.filter(z => z.is_complete_today).length / zones.length) : 0;
-      const completeToday = Number(ratio.toFixed(2));
+      // Calculate Ratios
+      const ratioToday = zones.length > 0 ? (zones.filter(z => z.is_complete_today).length / zones.length) : 0;
+      const ratioTomorrow = zones.length > 0 ? (zones.filter(z => z.is_complete_tomorrow).length / zones.length) : 0;
 
       return new Response(JSON.stringify({ 
-          bridge: "PBTH Energy Bridge Pro (v3.6)", 
+          bridge: "PBTH Energy Bridge Pro (v3.7)", 
           summary: { 
               total_zones: zones.length, 
-              complete_today: completeToday, 
+              complete_today: Number(ratioToday.toFixed(2)),
+              complete_tomorrow: Number(ratioTomorrow.toFixed(2)),
               entsoe_service_online: entsoeServiceOnline,
               last_push: lastUpdateRaw 
           }, 
@@ -155,7 +169,7 @@ export default {
         });
     }
     
-    return new Response("PBTH Energy Bridge v3.6 Online", { status: 200 });
+    return new Response("PBTH Energy Bridge v3.7 Online", { status: 200 });
   },
 
   // 2. CRON SCHEDULED HANDLER (Watchdog) -> Homey Alert
@@ -169,11 +183,10 @@ export default {
     const diffMs = now - lastUpdate;
     const diffMinutes = Math.floor(diffMs / 60000);
 
-    // THRESHOLD: 30 minutes silence (Changed in v3.6)
+    // THRESHOLD: 30 minutes silence
     if (diffMinutes > 30 && env.HOMEY_WEBHOOK_URL) {
         console.log(`WATCHDOG ALERT: No data for ${diffMinutes} minutes.`);
         
-        // POST to Homey
         await fetch(env.HOMEY_WEBHOOK_URL, { 
             method: 'POST', 
             headers: { 'Content-Type': 'application/json' }, 
