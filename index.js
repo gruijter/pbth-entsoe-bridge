@@ -1,5 +1,5 @@
 /**
- * Power by the Hour - ENTSO-E Energy Bridge (v3.9 Quota Monitor)
+ * Power by the Hour - ENTSO-E Energy Bridge (v3.10 Stable Watchdog)
  *
  * GET /?zone=[EIC_CODE]&key=[AUTH_KEY]
  * GET /?status=true&key=[AUTH_KEY]
@@ -95,7 +95,7 @@ export default {
         });
     }
 
-    // B. STATUS logic (v3.9 Detailed Stats)
+    // B. STATUS logic (v3.10)
     if (url.searchParams.has("status")) {
       const list = await env.PBTH_STORAGE.list({ prefix: STORAGE_PREFIX });
       const lastUpdateRaw = await env.PBTH_STORAGE.get("bridge_last_update") || "N/A";
@@ -103,16 +103,15 @@ export default {
       // Load Stats
       let stats = await env.PBTH_STORAGE.get("bridge_stats_daily", { type: "json" }) || { date: "", requests: 0, writes: 0 };
       
-      // Real-time projection (KV stats + memory buffer)
       const currentTotalRequests = (stats.requests || 0) + requestBuffer;
       const currentTotalWrites = (stats.writes || 0);
 
-      // Service Status
+      // Service Status (Threshold increased to 60 mins)
       let entsoeServiceOnline = false;
       if (lastUpdateRaw !== "N/A") {
           const lastUpdateDate = new Date(lastUpdateRaw);
           const diffMs = new Date() - lastUpdateDate;
-          entsoeServiceOnline = Math.floor(diffMs / 60000) <= 30;
+          entsoeServiceOnline = Math.floor(diffMs / 60000) <= 60;
       }
 
       // Targets
@@ -145,7 +144,7 @@ export default {
       const writePercent = ((currentTotalWrites / 1000) * 100).toFixed(2) + "%";
 
       return new Response(JSON.stringify({ 
-          bridge: "PBTH Energy Bridge Pro (v3.9)", 
+          bridge: "PBTH Energy Bridge Pro (v3.10)", 
           summary: { 
               total_zones: zones.length, 
               complete_today: Number(ratioToday.toFixed(2)),
@@ -175,28 +174,24 @@ export default {
         }, null, 2), { headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*", "Cache-Control": "public, max-age=300" } });
     }
     
-    return new Response("PBTH Energy Bridge v3.9 Online", { status: 200 });
+    return new Response("PBTH Energy Bridge v3.10 Online", { status: 200 });
   },
 
   // 2. CRON SCHEDULED HANDLER (Watchdog & Stats Aggregator)
   async scheduled(event, env, ctx) {
-    // A. STATS AGGREGATION (Safe KV Write)
+    // A. STATS AGGREGATION
     const todayStr = new Date().toISOString().split('T')[0];
     let stats = await env.PBTH_STORAGE.get("bridge_stats_daily", { type: "json" }) || { date: todayStr, requests: 0, writes: 0 };
     
-    // Reset if new day
     if (stats.date !== todayStr) {
         stats = { date: todayStr, requests: 0, writes: 0 };
     }
-
-    // Flush buffer to DB
     stats.requests += requestBuffer;
-    stats.writes += 1; // 1 write for this stats update
-    
+    stats.writes += 1;
     await env.PBTH_STORAGE.put("bridge_stats_daily", JSON.stringify(stats));
-    requestBuffer = 0; // Reset memory buffer
+    requestBuffer = 0;
 
-    // B. WATCHDOG
+    // B. WATCHDOG (Threshold increased to 60 mins)
     const lastUpdateRaw = await env.PBTH_STORAGE.get("bridge_last_update");
     if (!lastUpdateRaw) return;
 
@@ -204,7 +199,8 @@ export default {
     const diffMs = new Date() - lastUpdate;
     const diffMinutes = Math.floor(diffMs / 60000);
 
-    if (diffMinutes > 30 && env.HOMEY_WEBHOOK_URL) {
+    // CHANGED: 30 -> 60 minutes
+    if (diffMinutes > 60 && env.HOMEY_WEBHOOK_URL) {
         console.log(`WATCHDOG ALERT: No data for ${diffMinutes} minutes.`);
         await fetch(env.HOMEY_WEBHOOK_URL, { 
             method: 'POST', 
