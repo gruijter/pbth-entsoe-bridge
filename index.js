@@ -1,10 +1,10 @@
 /**
- * Power by the Hour - ENTSO-E Energy Bridge (v3.7)
+ * Power by the Hour - ENTSO-E Energy Bridge (v3.9 Quota Monitor)
  *
  * GET /?zone=[EIC_CODE]&key=[AUTH_KEY]
  * GET /?status=true&key=[AUTH_KEY]
  * GET /?delete=[EIC_CODE]&key=[AUTH_KEY]
- * CRON: Watchdog checks health every 15 mins (Alerts Homey after 30 mins silence)
+ * CRON: Watchdog checks health + Aggregates stats every 15 mins
  */
 
 const ZONE_NAMES = {
@@ -25,7 +25,10 @@ const ZONE_NAMES = {
   "10Y1001A1001A73I": "Italy North", "10YGR-HTSO-----Y": "Greece", "10Y1001A1001A59C": "Germany (Amprion Area)"
 };
 
-// Helper for robust XML extraction (insensitive to whitespace and attributes)
+// GLOBAL MEMORY BUFFER (Resets if worker sleeps, aggregated by Cron)
+let requestBuffer = 0;
+
+// Helper for robust XML extraction
 const getTagValue = (xml, tagName) => {
   const regex = new RegExp(`<[^>]*${tagName}[^>]*>([^<]+)<\\/[^>]*${tagName}>`, "i");
   const match = xml.match(regex);
@@ -35,6 +38,7 @@ const getTagValue = (xml, tagName) => {
 export default {
   // 1. STANDARD HTTP REQUEST HANDLER
   async fetch(request, env, ctx) {
+    requestBuffer++; // Count every hit in memory
     const STORAGE_PREFIX = "prices_";
     const url = new URL(request.url);
 
@@ -91,67 +95,71 @@ export default {
         });
     }
 
-    // B. STATUS logic (UPDATED v3.7)
+    // B. STATUS logic (v3.9 Detailed Stats)
     if (url.searchParams.has("status")) {
       const list = await env.PBTH_STORAGE.list({ prefix: STORAGE_PREFIX });
       const lastUpdateRaw = await env.PBTH_STORAGE.get("bridge_last_update") || "N/A";
       
-      // Calculate Service Online Status
+      // Load Stats
+      let stats = await env.PBTH_STORAGE.get("bridge_stats_daily", { type: "json" }) || { date: "", requests: 0, writes: 0 };
+      
+      // Real-time projection (KV stats + memory buffer)
+      const currentTotalRequests = (stats.requests || 0) + requestBuffer;
+      const currentTotalWrites = (stats.writes || 0);
+
+      // Service Status
       let entsoeServiceOnline = false;
       if (lastUpdateRaw !== "N/A") {
           const lastUpdateDate = new Date(lastUpdateRaw);
           const diffMs = new Date() - lastUpdateDate;
-          const diffMinutes = Math.floor(diffMs / 60000);
-          entsoeServiceOnline = diffMinutes <= 30;
+          entsoeServiceOnline = Math.floor(diffMs / 60000) <= 30;
       }
 
-      // Calculate Target Times
-      const todayTarget = new Date();
-      todayTarget.setUTCHours(23, 0, 0, 0);
-
-      const tomorrowTarget = new Date(todayTarget);
-      tomorrowTarget.setDate(tomorrowTarget.getDate() + 1);
+      // Targets
+      const todayTarget = new Date(); todayTarget.setUTCHours(23, 0, 0, 0);
+      const tomorrowTarget = new Date(todayTarget); tomorrowTarget.setDate(tomorrowTarget.getDate() + 1);
 
       const zones = list.keys.map(k => {
         let isCompleteToday = false;
         let isCompleteTomorrow = false;
-
         if (k.metadata?.latest) {
           const latestDate = new Date(k.metadata.latest);
           const resMinutes = k.metadata.res || 60;
           const endTime = new Date(latestDate.getTime() + resMinutes * 60000);
-          
           isCompleteToday = endTime >= todayTarget;
           isCompleteTomorrow = endTime >= tomorrowTarget;
         }
         const eic = k.name.replace(STORAGE_PREFIX, "");
         return { 
-          zone: eic, 
-          name: k.metadata?.name || ZONE_NAMES[eic] || "N/A", 
-          updated: k.metadata?.updated || "N/A", 
-          latest_data: k.metadata?.latest || "N/A", 
-          is_complete_today: isCompleteToday,
-          is_complete_tomorrow: isCompleteTomorrow, 
-          points: k.metadata?.count || 0, 
-          res: `${k.metadata?.res || 60}m`, 
-          seq: k.metadata?.seq || "1", 
-          curr: k.metadata?.currency || "EUR" 
+          zone: eic, name: k.metadata?.name || ZONE_NAMES[eic] || "N/A", updated: k.metadata?.updated || "N/A", 
+          latest_data: k.metadata?.latest || "N/A", is_complete_today: isCompleteToday, is_complete_tomorrow: isCompleteTomorrow, 
+          points: k.metadata?.count || 0, res: `${k.metadata?.res || 60}m`, seq: k.metadata?.seq || "1", curr: k.metadata?.currency || "EUR" 
         };
       });
 
-      // Calculate Ratios
       const ratioToday = zones.length > 0 ? (zones.filter(z => z.is_complete_today).length / zones.length) : 0;
       const ratioTomorrow = zones.length > 0 ? (zones.filter(z => z.is_complete_tomorrow).length / zones.length) : 0;
+      
+      // Calc usage percentages (Free Plan Limits: 100k Requests, 1k Writes)
+      const reqPercent = ((currentTotalRequests / 100000) * 100).toFixed(2) + "%";
+      const writePercent = ((currentTotalWrites / 1000) * 100).toFixed(2) + "%";
 
       return new Response(JSON.stringify({ 
-          bridge: "PBTH Energy Bridge Pro (v3.7)", 
+          bridge: "PBTH Energy Bridge Pro (v3.9)", 
           summary: { 
               total_zones: zones.length, 
               complete_today: Number(ratioToday.toFixed(2)),
               complete_tomorrow: Number(ratioTomorrow.toFixed(2)),
               entsoe_service_online: entsoeServiceOnline,
               last_push: lastUpdateRaw 
-          }, 
+          },
+          usage: {
+              requests_today: currentTotalRequests,
+              requests_quota_used: reqPercent,
+              kv_writes_today: currentTotalWrites,
+              writes_quota_used: writePercent,
+              note: "Resets at 00:00 UTC"
+          },
           zones: zones.sort((a,b) => a.zone.localeCompare(b.zone)) 
       }, null, 2), { headers: { "Content-Type": "application/json" } });
     }
@@ -164,29 +172,40 @@ export default {
         return new Response(JSON.stringify({ 
             zone, name: metadata?.name || ZONE_NAMES[zone] || "N/A", 
             updated: metadata?.updated, points: metadata?.count, res: `${metadata?.res}m`, data: JSON.parse(value) 
-        }, null, 2), { 
-            headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*", "Cache-Control": "public, max-age=300" } 
-        });
+        }, null, 2), { headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*", "Cache-Control": "public, max-age=300" } });
     }
     
-    return new Response("PBTH Energy Bridge v3.7 Online", { status: 200 });
+    return new Response("PBTH Energy Bridge v3.9 Online", { status: 200 });
   },
 
-  // 2. CRON SCHEDULED HANDLER (Watchdog) -> Homey Alert
-  // Requires [triggers] crons = ["*/15 * * * *"] in wrangler.toml
+  // 2. CRON SCHEDULED HANDLER (Watchdog & Stats Aggregator)
   async scheduled(event, env, ctx) {
+    // A. STATS AGGREGATION (Safe KV Write)
+    const todayStr = new Date().toISOString().split('T')[0];
+    let stats = await env.PBTH_STORAGE.get("bridge_stats_daily", { type: "json" }) || { date: todayStr, requests: 0, writes: 0 };
+    
+    // Reset if new day
+    if (stats.date !== todayStr) {
+        stats = { date: todayStr, requests: 0, writes: 0 };
+    }
+
+    // Flush buffer to DB
+    stats.requests += requestBuffer;
+    stats.writes += 1; // 1 write for this stats update
+    
+    await env.PBTH_STORAGE.put("bridge_stats_daily", JSON.stringify(stats));
+    requestBuffer = 0; // Reset memory buffer
+
+    // B. WATCHDOG
     const lastUpdateRaw = await env.PBTH_STORAGE.get("bridge_last_update");
     if (!lastUpdateRaw) return;
 
     const lastUpdate = new Date(lastUpdateRaw);
-    const now = new Date();
-    const diffMs = now - lastUpdate;
+    const diffMs = new Date() - lastUpdate;
     const diffMinutes = Math.floor(diffMs / 60000);
 
-    // THRESHOLD: 30 minutes silence
     if (diffMinutes > 30 && env.HOMEY_WEBHOOK_URL) {
         console.log(`WATCHDOG ALERT: No data for ${diffMinutes} minutes.`);
-        
         await fetch(env.HOMEY_WEBHOOK_URL, { 
             method: 'POST', 
             headers: { 'Content-Type': 'application/json' }, 
