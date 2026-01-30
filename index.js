@@ -1,14 +1,11 @@
 /**
- * Power by the Hour - ENTSO-E Energy Bridge (v3.14 Smart Sampling)
+ * Power by the Hour - ENTSO-E Energy Bridge (v3.15 Crash Fix)
  *
- * API ENDPOINTS:
- * GET /?zone=[EIC_CODE]&key=[AUTH_KEY]     -> Get specific zone prices
- * GET /?status=true&key=[AUTH_KEY]         -> Get bridge health & stats
- * GET /?delete=[EIC_CODE]&key=[AUTH_KEY]   -> Delete zone data
+ * FIX: Removed dependency on 'crypto' object to prevent ReferenceError.
+ * Uses custom UUID generator instead.
  *
  * STATISTICS STRATEGY:
- * Smart Sampling (1 in 10) is used to bypass Cloudflare Free Plan Write Limits (1000/day).
- * This allows counting up to ~10,000 requests/day while only writing ~1,000 times.
+ * Smart Sampling (1 in 10) is used to bypass Cloudflare Free Plan Write Limits.
  */
 
 const ZONE_NAMES = {
@@ -29,37 +26,34 @@ const ZONE_NAMES = {
   "10Y1001A1001A73I": "Italy North", "10YGR-HTSO-----Y": "Greece", "10Y1001A1001A59C": "Germany (Amprion Area)"
 };
 
-// CONFIGURATION
-const SAMPLE_RATE = 10; // Only write 1 in 10 requests to DB (Multiply count by 10)
+const SAMPLE_RATE = 10; 
 
-// Helper for robust XML extraction
+// 1. SAFE UUID GENERATOR (Replaces crypto.randomUUID)
+const generateUUID = () => {
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
+    var r = Math.random() * 16 | 0, v = c == 'x' ? r : (r & 0x3 | 0x8);
+    return v.toString(16);
+  });
+};
+
 const getTagValue = (xml, tagName) => {
   const regex = new RegExp(`<[^>]*${tagName}[^>]*>([^<]+)<\\/[^>]*${tagName}>`, "i");
   const match = xml.match(regex);
   return match ? match[1].trim() : null;
 };
 
-// Helper to update stats with Sampling Strategy
 async function updateStats(env) {
-    // RANDOM SAMPLING: Only proceed 10% of the time (approx)
-    // This reduces DB Writes by 90%, allowing 10x more traffic measurement.
-    if (Math.random() > (1 / SAMPLE_RATE)) {
-        return Promise.resolve(); // Do nothing (save quota)
-    }
+    if (Math.random() > (1 / SAMPLE_RATE)) return Promise.resolve();
 
     const todayStr = new Date().toISOString().split('T')[0];
     let stats = await env.PBTH_STORAGE.get("bridge_stats_daily", { type: "json" }) || { date: todayStr, requests: 0, writes: 0 };
     
-    // Reset if new day (UTC Midnight)
     if (stats.date !== todayStr) {
         stats = { date: todayStr, requests: 0, writes: 0 };
     }
 
-    // Since we only run 1 in 10 times, we add 10 to the counter!
     stats.requests += SAMPLE_RATE;
 
-    // Safety Cap: Stop writing if we hit 950 writes (Free plan limit is 1000)
-    // With sampling, this supports up to ~9,500 requests/day.
     if (stats.writes < 950) {
         stats.writes++;
         return env.PBTH_STORAGE.put("bridge_stats_daily", JSON.stringify(stats));
@@ -69,33 +63,28 @@ async function updateStats(env) {
 }
 
 export default {
-  // 1. STANDARD HTTP REQUEST HANDLER
   async fetch(request, env, ctx) {
     const STORAGE_PREFIX = "prices_";
     const url = new URL(request.url);
 
     if (url.pathname === '/favicon.ico') return new Response(null, { status: 204 });
 
-    // UPDATE STATS (Fire and forget via waitUntil)
     ctx.waitUntil(updateStats(env));
 
-    // --- POST HANDLING (ENTSO-E PUSH) ---
+    // --- POST HANDLING ---
     if (request.method === "POST") {
+      // Safe ID generation
       let ackData = { 
-        mrid: "PING-" + crypto.randomUUID(), 
-        sender: "10X1001A1001A450", 
-        senderRole: "A32", 
-        receiver: env.MY_EIC_CODE || "37XPBTH-DUMMY-1", 
-        receiverRole: "A39" 
+        mrid: "PING-" + generateUUID(), 
+        sender: "10X1001A1001A450", senderRole: "A32", 
+        receiver: env.MY_EIC_CODE || "37XPBTH-DUMMY-1", receiverRole: "A39" 
       };
 
       try {
         const contentLength = request.headers.get("content-length");
-        
         if (contentLength && contentLength !== "0") {
             const xmlData = await request.text();
             
-            // Mirror logic for ACK
             const mrid = getTagValue(xmlData, "mRID"); if (mrid) ackData.mrid = mrid;
             const sender = getTagValue(xmlData, "sender_MarketParticipant.mRID"); if (sender) ackData.receiver = sender;
             const senderRole = getTagValue(xmlData, "sender_MarketParticipant.marketRole.type"); if (senderRole) ackData.receiverRole = senderRole;
@@ -114,31 +103,24 @@ export default {
       }
     }
 
-    // --- GET & AUTH HANDLING ---
+    // --- GET & AUTH ---
     const isAuthEnabled = env.AUTH_KEY && env.AUTH_KEY.trim().length > 0;
     if (isAuthEnabled) {
       const key = url.searchParams.get("key") || request.headers.get("X-API-Key");
       if (key !== env.AUTH_KEY.trim()) return new Response("Unauthorized", { status: 401 });
     }
 
-    // A. DELETE logic
     if (url.searchParams.has("delete")) {
         const zoneToDelete = url.searchParams.get("delete");
         await env.PBTH_STORAGE.delete(STORAGE_PREFIX + zoneToDelete);
-        return new Response(JSON.stringify({ message: `Deleted zone ${zoneToDelete}` }), { 
-            status: 200, headers: { "Content-Type": "application/json" } 
-        });
+        return new Response(JSON.stringify({ message: `Deleted zone ${zoneToDelete}` }), { status: 200, headers: { "Content-Type": "application/json" } });
     }
 
-    // B. STATUS logic (v3.14 Smart Sampling)
     if (url.searchParams.has("status")) {
       const list = await env.PBTH_STORAGE.list({ prefix: STORAGE_PREFIX });
       const lastUpdateRaw = await env.PBTH_STORAGE.get("bridge_last_update") || "N/A";
-      
-      // Load Stats (Directly from DB)
       let stats = await env.PBTH_STORAGE.get("bridge_stats_daily", { type: "json" }) || { date: "", requests: 0, writes: 0 };
       
-      // Service Status (60 min threshold)
       let entsoeServiceOnline = false;
       if (lastUpdateRaw !== "N/A") {
           const lastUpdateDate = new Date(lastUpdateRaw);
@@ -146,7 +128,6 @@ export default {
           entsoeServiceOnline = Math.floor(diffMs / 60000) <= 60;
       }
 
-      // Targets
       const todayTarget = new Date(); todayTarget.setUTCHours(23, 0, 0, 0);
       const tomorrowTarget = new Date(todayTarget); tomorrowTarget.setDate(tomorrowTarget.getDate() + 1);
 
@@ -170,13 +151,11 @@ export default {
 
       const ratioToday = zones.length > 0 ? (zones.filter(z => z.is_complete_today).length / zones.length) : 0;
       const ratioTomorrow = zones.length > 0 ? (zones.filter(z => z.is_complete_tomorrow).length / zones.length) : 0;
-      
       const reqPercent = ((stats.requests / 100000) * 100).toFixed(2) + "%";
       const writePercent = ((stats.writes / 1000) * 100).toFixed(2) + "%";
-      const quotaLimited = stats.writes >= 950;
 
       return new Response(JSON.stringify({ 
-          bridge: "PBTH Energy Bridge Pro (v3.14)", 
+          bridge: "PBTH Energy Bridge Pro (v3.15)", 
           summary: { 
               total_zones: zones.length, 
               complete_today: Number(ratioToday.toFixed(2)),
@@ -190,14 +169,13 @@ export default {
               kv_writes_today: stats.writes,
               writes_quota_used: writePercent,
               sampling_mode: "1 in " + SAMPLE_RATE,
-              quota_protection_active: quotaLimited,
-              note: "Counter updates in steps of 10. Resets at 00:00 UTC"
+              quota_protection_active: stats.writes >= 950,
+              note: "Resets at 00:00 UTC"
           },
           zones: zones.sort((a,b) => a.zone.localeCompare(b.zone)) 
       }, null, 2), { headers: { "Content-Type": "application/json" } });
     }
 
-    // C. GET ZONE logic
     const zone = url.searchParams.get("zone");
     if (zone) {
         const { value, metadata } = await env.PBTH_STORAGE.getWithMetadata(STORAGE_PREFIX + zone);
@@ -208,10 +186,9 @@ export default {
         }, null, 2), { headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*", "Cache-Control": "public, max-age=300" } });
     }
     
-    return new Response("PBTH Energy Bridge v3.14 Online", { status: 200 });
+    return new Response("PBTH Energy Bridge v3.15 Online", { status: 200 });
   },
 
-  // 2. CRON SCHEDULED HANDLER (Watchdog ONLY)
   async scheduled(event, env, ctx) {
     const lastUpdateRaw = await env.PBTH_STORAGE.get("bridge_last_update");
     if (!lastUpdateRaw) return;
@@ -236,7 +213,6 @@ export default {
     }
   },
 
-  // 3. DATA PROCESSING
   async processData(xmlData, env, STORAGE_PREFIX) {
     try {
         const zoneEic = getTagValue(xmlData, "out_Domain.mRID") || "UNKNOWN";
@@ -283,13 +259,7 @@ export default {
                     await fetch(env.HOMEY_WEBHOOK_URL, { 
                         method: 'POST', 
                         headers: { 'Content-Type': 'application/json' }, 
-                        body: JSON.stringify({ 
-                            event: "price_update", 
-                            zone: zoneEic, 
-                            name: zoneName, 
-                            updated: now, 
-                            data: sortedPrices 
-                        }) 
+                        body: JSON.stringify({ event: "price_update", zone: zoneEic, name: zoneName, updated: now, data: sortedPrices }) 
                     }).catch(() => {});
                 }
             }
@@ -299,6 +269,7 @@ export default {
 
   generateAck(data) {
     const time = new Date().toISOString().split('.')[0] + "Z";
-    return `<?xml version="1.0" encoding="UTF-8"?><Acknowledgement_MarketDocument xmlns="urn:iec62325.351:tc57wg16:451-1:acknowledgementdocument:7:0"><mRID>${crypto.randomUUID()}</mRID><createdDateTime>${time}</createdDateTime><sender_MarketParticipant.mRID codingScheme="A01">${data.sender}</sender_MarketParticipant.mRID><sender_MarketParticipant.marketRole.type>${data.senderRole}</sender_MarketParticipant.marketRole.type><receiver_MarketParticipant.mRID codingScheme="A01">${data.receiver}</receiver_MarketParticipant.mRID><receiver_MarketParticipant.marketRole.type>${data.receiverRole}</receiver_MarketParticipant.marketRole.type><received_MarketDocument.mRID>${data.mrid}</received_MarketDocument.mRID><reason><code>A01</code></reason></Acknowledgement_MarketDocument>`.trim();
+    // NOTE: Uses custom generateUUID() instead of crypto to prevent crashes
+    return `<?xml version="1.0" encoding="UTF-8"?><Acknowledgement_MarketDocument xmlns="urn:iec62325.351:tc57wg16:451-1:acknowledgementdocument:7:0"><mRID>${generateUUID()}</mRID><createdDateTime>${time}</createdDateTime><sender_MarketParticipant.mRID codingScheme="A01">${data.sender}</sender_MarketParticipant.mRID><sender_MarketParticipant.marketRole.type>${data.senderRole}</sender_MarketParticipant.marketRole.type><receiver_MarketParticipant.mRID codingScheme="A01">${data.receiver}</receiver_MarketParticipant.mRID><receiver_MarketParticipant.marketRole.type>${data.receiverRole}</receiver_MarketParticipant.marketRole.type><received_MarketDocument.mRID>${data.mrid}</received_MarketDocument.mRID><reason><code>A01</code></reason></Acknowledgement_MarketDocument>`.trim();
   }
 };
