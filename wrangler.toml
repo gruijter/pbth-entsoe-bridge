@@ -8,6 +8,9 @@ routes = [
 	{ pattern = "entsoe.gruijter.org", custom_domain = true }
 ]
 
+[triggers]
+crons = ["*/30 * * * *"]
+
 [[kv_namespaces]]
 binding = "PBTH_STORAGE"
 id = "7b7bd180419941cc8358526514dd5c38"
