@@ -9,7 +9,7 @@ routes = [
 ]
 
 [triggers]
-crons = ["*/30 * * * *"]
+crons = ["*/15 * * * *"]
 
 [[kv_namespaces]]
 binding = "PBTH_STORAGE"
