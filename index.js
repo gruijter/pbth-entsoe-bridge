@@ -1,11 +1,31 @@
 /**
- * Power by the Hour - ENTSO-E Energy Bridge (v3.15 Crash Fix)
+ * Power by the Hour - ENTSO-E Energy Bridge (v3.18 Clean & Stable)
  *
- * FIX: Removed dependency on 'crypto' object to prevent ReferenceError.
- * Uses custom UUID generator instead.
+ * API ENDPOINTS:
+ * GET /?zone=[EIC_CODE]&key=[AUTH_KEY]     -> Get specific zone prices
+ * GET /?status=true&key=[AUTH_KEY]         -> Get bridge health & zones
+ * GET /?delete=[EIC_CODE]&key=[AUTH_KEY]   -> Delete zone data
  *
- * STATISTICS STRATEGY:
- * Smart Sampling (1 in 10) is used to bypass Cloudflare Free Plan Write Limits.
+ * CRON: Watchdog checks health every 15 mins (Alerts Homey after 60 mins silence)
+ *
+ * HOMEY WEBHOOK EVENTS (POST):
+ * 1. event: "price_update" (Sent when new prices arrive)
+ * Payload: { 
+ * "event": "price_update", 
+ * "zone": "10YNL...", 
+ * "name": "Netherlands", 
+ * "updated": "2026-01-30T13:00:00Z", 
+ * "data": [{ "time": "...", "price": 12.5 }, ...] 
+ * }
+ *
+ * 2. event: "alert_connection_lost" (Sent by Watchdog after >60 mins silence)
+ * Payload: { 
+ * "event": "alert_connection_lost", 
+ * "message": "Alert: Geen ENTSO-E data ontvangen...", 
+ * "minutes_silence": 65, 
+ * "last_seen": "2026-01-30T10:00:00Z",
+ * "entsoe_service_online": false
+ * }
  */
 
 const ZONE_NAMES = {
@@ -26,9 +46,7 @@ const ZONE_NAMES = {
   "10Y1001A1001A73I": "Italy North", "10YGR-HTSO-----Y": "Greece", "10Y1001A1001A59C": "Germany (Amprion Area)"
 };
 
-const SAMPLE_RATE = 10; 
-
-// 1. SAFE UUID GENERATOR (Replaces crypto.randomUUID)
+// 1. SAFE UUID GENERATOR (Replaces crypto.randomUUID to prevent crashes)
 const generateUUID = () => {
   return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
     var r = Math.random() * 16 | 0, v = c == 'x' ? r : (r & 0x3 | 0x8);
@@ -36,44 +54,23 @@ const generateUUID = () => {
   });
 };
 
+// Helper for robust XML extraction
 const getTagValue = (xml, tagName) => {
   const regex = new RegExp(`<[^>]*${tagName}[^>]*>([^<]+)<\\/[^>]*${tagName}>`, "i");
   const match = xml.match(regex);
   return match ? match[1].trim() : null;
 };
 
-async function updateStats(env) {
-    if (Math.random() > (1 / SAMPLE_RATE)) return Promise.resolve();
-
-    const todayStr = new Date().toISOString().split('T')[0];
-    let stats = await env.PBTH_STORAGE.get("bridge_stats_daily", { type: "json" }) || { date: todayStr, requests: 0, writes: 0 };
-    
-    if (stats.date !== todayStr) {
-        stats = { date: todayStr, requests: 0, writes: 0 };
-    }
-
-    stats.requests += SAMPLE_RATE;
-
-    if (stats.writes < 950) {
-        stats.writes++;
-        return env.PBTH_STORAGE.put("bridge_stats_daily", JSON.stringify(stats));
-    } else {
-        return Promise.resolve(); 
-    }
-}
-
 export default {
+  // 1. STANDARD HTTP REQUEST HANDLER
   async fetch(request, env, ctx) {
     const STORAGE_PREFIX = "prices_";
     const url = new URL(request.url);
 
     if (url.pathname === '/favicon.ico') return new Response(null, { status: 204 });
 
-    ctx.waitUntil(updateStats(env));
-
-    // --- POST HANDLING ---
+    // --- POST HANDLING (ENTSO-E PUSH) ---
     if (request.method === "POST") {
-      // Safe ID generation
       let ackData = { 
         mrid: "PING-" + generateUUID(), 
         sender: "10X1001A1001A450", senderRole: "A32", 
@@ -85,6 +82,7 @@ export default {
         if (contentLength && contentLength !== "0") {
             const xmlData = await request.text();
             
+            // Mirror logic for ACK
             const mrid = getTagValue(xmlData, "mRID"); if (mrid) ackData.mrid = mrid;
             const sender = getTagValue(xmlData, "sender_MarketParticipant.mRID"); if (sender) ackData.receiver = sender;
             const senderRole = getTagValue(xmlData, "sender_MarketParticipant.marketRole.type"); if (senderRole) ackData.receiverRole = senderRole;
@@ -95,6 +93,7 @@ export default {
               ctx.waitUntil(this.processData(xmlData, env, STORAGE_PREFIX));
             }
         }
+        // Always return valid XML to keep ENTSO-E happy
         return new Response(this.generateAck(ackData), { status: 200, headers: { "Content-Type": "application/xml" } });
 
       } catch (err) {
@@ -103,24 +102,28 @@ export default {
       }
     }
 
-    // --- GET & AUTH ---
+    // --- GET & AUTH HANDLING ---
     const isAuthEnabled = env.AUTH_KEY && env.AUTH_KEY.trim().length > 0;
     if (isAuthEnabled) {
       const key = url.searchParams.get("key") || request.headers.get("X-API-Key");
       if (key !== env.AUTH_KEY.trim()) return new Response("Unauthorized", { status: 401 });
     }
 
+    // A. DELETE logic
     if (url.searchParams.has("delete")) {
         const zoneToDelete = url.searchParams.get("delete");
         await env.PBTH_STORAGE.delete(STORAGE_PREFIX + zoneToDelete);
-        return new Response(JSON.stringify({ message: `Deleted zone ${zoneToDelete}` }), { status: 200, headers: { "Content-Type": "application/json" } });
+        return new Response(JSON.stringify({ message: `Deleted zone ${zoneToDelete}` }), { 
+            status: 200, headers: { "Content-Type": "application/json" } 
+        });
     }
 
+    // B. STATUS logic (No Stats, just health)
     if (url.searchParams.has("status")) {
       const list = await env.PBTH_STORAGE.list({ prefix: STORAGE_PREFIX });
       const lastUpdateRaw = await env.PBTH_STORAGE.get("bridge_last_update") || "N/A";
-      let stats = await env.PBTH_STORAGE.get("bridge_stats_daily", { type: "json" }) || { date: "", requests: 0, writes: 0 };
       
+      // Service Status (60 min threshold)
       let entsoeServiceOnline = false;
       if (lastUpdateRaw !== "N/A") {
           const lastUpdateDate = new Date(lastUpdateRaw);
@@ -128,6 +131,7 @@ export default {
           entsoeServiceOnline = Math.floor(diffMs / 60000) <= 60;
       }
 
+      // Targets
       const todayTarget = new Date(); todayTarget.setUTCHours(23, 0, 0, 0);
       const tomorrowTarget = new Date(todayTarget); tomorrowTarget.setDate(tomorrowTarget.getDate() + 1);
 
@@ -151,11 +155,9 @@ export default {
 
       const ratioToday = zones.length > 0 ? (zones.filter(z => z.is_complete_today).length / zones.length) : 0;
       const ratioTomorrow = zones.length > 0 ? (zones.filter(z => z.is_complete_tomorrow).length / zones.length) : 0;
-      const reqPercent = ((stats.requests / 100000) * 100).toFixed(2) + "%";
-      const writePercent = ((stats.writes / 1000) * 100).toFixed(2) + "%";
-
+      
       return new Response(JSON.stringify({ 
-          bridge: "PBTH Energy Bridge Pro (v3.15)", 
+          bridge: "PBTH Energy Bridge Pro (v3.18)", 
           summary: { 
               total_zones: zones.length, 
               complete_today: Number(ratioToday.toFixed(2)),
@@ -163,19 +165,11 @@ export default {
               entsoe_service_online: entsoeServiceOnline,
               last_push: lastUpdateRaw 
           },
-          usage: {
-              estimated_requests_today: stats.requests,
-              requests_quota_used: reqPercent,
-              kv_writes_today: stats.writes,
-              writes_quota_used: writePercent,
-              sampling_mode: "1 in " + SAMPLE_RATE,
-              quota_protection_active: stats.writes >= 950,
-              note: "Resets at 00:00 UTC"
-          },
           zones: zones.sort((a,b) => a.zone.localeCompare(b.zone)) 
       }, null, 2), { headers: { "Content-Type": "application/json" } });
     }
 
+    // C. GET ZONE logic
     const zone = url.searchParams.get("zone");
     if (zone) {
         const { value, metadata } = await env.PBTH_STORAGE.getWithMetadata(STORAGE_PREFIX + zone);
@@ -186,9 +180,10 @@ export default {
         }, null, 2), { headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*", "Cache-Control": "public, max-age=300" } });
     }
     
-    return new Response("PBTH Energy Bridge v3.15 Online", { status: 200 });
+    return new Response("PBTH Energy Bridge v3.18 Online", { status: 200 });
   },
 
+  // 2. CRON SCHEDULED HANDLER (Watchdog ONLY)
   async scheduled(event, env, ctx) {
     const lastUpdateRaw = await env.PBTH_STORAGE.get("bridge_last_update");
     if (!lastUpdateRaw) return;
@@ -197,6 +192,7 @@ export default {
     const diffMs = new Date() - lastUpdate;
     const diffMinutes = Math.floor(diffMs / 60000);
 
+    // Alert if silence > 60 minutes
     if (diffMinutes > 60 && env.HOMEY_WEBHOOK_URL) {
         console.log(`WATCHDOG ALERT: No data for ${diffMinutes} minutes.`);
         await fetch(env.HOMEY_WEBHOOK_URL, { 
@@ -213,6 +209,7 @@ export default {
     }
   },
 
+  // 3. DATA PROCESSING
   async processData(xmlData, env, STORAGE_PREFIX) {
     try {
         const zoneEic = getTagValue(xmlData, "out_Domain.mRID") || "UNKNOWN";
@@ -267,9 +264,9 @@ export default {
     } catch (e) { console.error("Async error:", e); }
   },
 
+  // NOTE: Uses custom generateUUID() instead of crypto to prevent crashes
   generateAck(data) {
     const time = new Date().toISOString().split('.')[0] + "Z";
-    // NOTE: Uses custom generateUUID() instead of crypto to prevent crashes
     return `<?xml version="1.0" encoding="UTF-8"?><Acknowledgement_MarketDocument xmlns="urn:iec62325.351:tc57wg16:451-1:acknowledgementdocument:7:0"><mRID>${generateUUID()}</mRID><createdDateTime>${time}</createdDateTime><sender_MarketParticipant.mRID codingScheme="A01">${data.sender}</sender_MarketParticipant.mRID><sender_MarketParticipant.marketRole.type>${data.senderRole}</sender_MarketParticipant.marketRole.type><receiver_MarketParticipant.mRID codingScheme="A01">${data.receiver}</receiver_MarketParticipant.mRID><receiver_MarketParticipant.marketRole.type>${data.receiverRole}</receiver_MarketParticipant.marketRole.type><received_MarketDocument.mRID>${data.mrid}</received_MarketDocument.mRID><reason><code>A01</code></reason></Acknowledgement_MarketDocument>`.trim();
   }
 };
