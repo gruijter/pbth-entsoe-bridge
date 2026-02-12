@@ -1,5 +1,5 @@
 /**
- * Power by the Hour - ENTSO-E Energy Bridge (v3.18 Clean & Stable)
+ * Power by the Hour - ENTSO-E Energy Bridge (v3.20 Evidence Logging)
  *
  * API ENDPOINTS:
  * GET /?zone=[EIC_CODE]&key=[AUTH_KEY]     -> Get specific zone prices
@@ -46,7 +46,7 @@ const ZONE_NAMES = {
   "10Y1001A1001A73I": "Italy North", "10YGR-HTSO-----Y": "Greece", "10Y1001A1001A59C": "Germany (Amprion Area)"
 };
 
-// 1. SAFE UUID GENERATOR (Replaces crypto.randomUUID to prevent crashes)
+// 1. SAFE UUID GENERATOR
 const generateUUID = () => {
   return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
     var r = Math.random() * 16 | 0, v = c == 'x' ? r : (r & 0x3 | 0x8);
@@ -74,7 +74,9 @@ export default {
       let ackData = { 
         mrid: "PING-" + generateUUID(), 
         sender: "10X1001A1001A450", senderRole: "A32", 
-        receiver: env.MY_EIC_CODE || "37XPBTH-DUMMY-1", receiverRole: "A39" 
+        receiver: env.MY_EIC_CODE || "37XPBTH-DUMMY-1", receiverRole: "A39",
+        docId: "UNKNOWN",
+        docRev: "1" 
       };
 
       try {
@@ -82,8 +84,10 @@ export default {
         if (contentLength && contentLength !== "0") {
             const xmlData = await request.text();
             
-            // Mirror logic for ACK
-            const mrid = getTagValue(xmlData, "mRID"); if (mrid) ackData.mrid = mrid;
+            // Extract Data
+            const mrid = getTagValue(xmlData, "mRID"); if (mrid) ackData.docId = mrid;
+            const rev = getTagValue(xmlData, "revisionNumber"); if (rev) ackData.docRev = rev;
+            
             const sender = getTagValue(xmlData, "sender_MarketParticipant.mRID"); if (sender) ackData.receiver = sender;
             const senderRole = getTagValue(xmlData, "sender_MarketParticipant.marketRole.type"); if (senderRole) ackData.receiverRole = senderRole;
             const receiver = getTagValue(xmlData, "receiver_MarketParticipant.mRID"); if (receiver) ackData.sender = receiver;
@@ -93,12 +97,26 @@ export default {
               ctx.waitUntil(this.processData(xmlData, env, STORAGE_PREFIX));
             }
         }
-        // Always return valid XML to keep ENTSO-E happy
-        return new Response(this.generateAck(ackData), { status: 200, headers: { "Content-Type": "application/xml" } });
+
+        // GENERATE ACK XML
+        const ackXml = this.generateAck(ackData);
+
+        // *** EVIDENCE LOGGING FOR HELPDESK ***
+        console.log("--- [ENTSO-E EVIDENCE LOG START] ---");
+        console.log(`RECEIVED DOC ID: ${ackData.docId}`);
+        console.log(`RECEIVED REVISION: ${ackData.docRev}`);
+        console.log("GENERATED ACKNOWLEDGMENT XML:");
+        console.log(ackXml);
+        console.log("--- [ENTSO-E EVIDENCE LOG END] ---");
+        // *************************************
+
+        return new Response(ackXml, { status: 200, headers: { "Content-Type": "application/xml" } });
 
       } catch (err) {
         console.error("Handler error:", err);
-        return new Response(this.generateAck(ackData), { status: 200, headers: { "Content-Type": "application/xml" } });
+        // Even on error, generate a basic ACK to keep connection alive if possible
+        const ackXml = this.generateAck(ackData);
+        return new Response(ackXml, { status: 200, headers: { "Content-Type": "application/xml" } });
       }
     }
 
@@ -118,12 +136,11 @@ export default {
         });
     }
 
-    // B. STATUS logic (No Stats, just health)
+    // B. STATUS logic
     if (url.searchParams.has("status")) {
       const list = await env.PBTH_STORAGE.list({ prefix: STORAGE_PREFIX });
       const lastUpdateRaw = await env.PBTH_STORAGE.get("bridge_last_update") || "N/A";
       
-      // Service Status (60 min threshold)
       let entsoeServiceOnline = false;
       if (lastUpdateRaw !== "N/A") {
           const lastUpdateDate = new Date(lastUpdateRaw);
@@ -131,7 +148,6 @@ export default {
           entsoeServiceOnline = Math.floor(diffMs / 60000) <= 60;
       }
 
-      // Targets
       const todayTarget = new Date(); todayTarget.setUTCHours(23, 0, 0, 0);
       const tomorrowTarget = new Date(todayTarget); tomorrowTarget.setDate(tomorrowTarget.getDate() + 1);
 
@@ -157,7 +173,7 @@ export default {
       const ratioTomorrow = zones.length > 0 ? (zones.filter(z => z.is_complete_tomorrow).length / zones.length) : 0;
       
       return new Response(JSON.stringify({ 
-          bridge: "PBTH Energy Bridge Pro (v3.18)", 
+          bridge: "PBTH Energy Bridge Pro (v3.20)", 
           summary: { 
               total_zones: zones.length, 
               complete_today: Number(ratioToday.toFixed(2)),
@@ -169,7 +185,6 @@ export default {
       }, null, 2), { headers: { "Content-Type": "application/json" } });
     }
 
-    // C. GET ZONE logic
     const zone = url.searchParams.get("zone");
     if (zone) {
         const { value, metadata } = await env.PBTH_STORAGE.getWithMetadata(STORAGE_PREFIX + zone);
@@ -180,10 +195,10 @@ export default {
         }, null, 2), { headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*", "Cache-Control": "public, max-age=300" } });
     }
     
-    return new Response("PBTH Energy Bridge v3.18 Online", { status: 200 });
+    return new Response("PBTH Energy Bridge v3.20 Online", { status: 200 });
   },
 
-  // 2. CRON SCHEDULED HANDLER (Watchdog ONLY)
+  // 2. CRON SCHEDULED HANDLER
   async scheduled(event, env, ctx) {
     const lastUpdateRaw = await env.PBTH_STORAGE.get("bridge_last_update");
     if (!lastUpdateRaw) return;
@@ -192,7 +207,6 @@ export default {
     const diffMs = new Date() - lastUpdate;
     const diffMinutes = Math.floor(diffMs / 60000);
 
-    // Alert if silence > 60 minutes
     if (diffMinutes > 60 && env.HOMEY_WEBHOOK_URL) {
         console.log(`WATCHDOG ALERT: No data for ${diffMinutes} minutes.`);
         await fetch(env.HOMEY_WEBHOOK_URL, { 
@@ -264,9 +278,23 @@ export default {
     } catch (e) { console.error("Async error:", e); }
   },
 
-  // NOTE: Uses custom generateUUID() instead of crypto to prevent crashes
+  // FIXED: STRICT COMPLIANCE ACK GENERATOR
   generateAck(data) {
     const time = new Date().toISOString().split('.')[0] + "Z";
-    return `<?xml version="1.0" encoding="UTF-8"?><Acknowledgement_MarketDocument xmlns="urn:iec62325.351:tc57wg16:451-1:acknowledgementdocument:7:0"><mRID>${generateUUID()}</mRID><createdDateTime>${time}</createdDateTime><sender_MarketParticipant.mRID codingScheme="A01">${data.sender}</sender_MarketParticipant.mRID><sender_MarketParticipant.marketRole.type>${data.senderRole}</sender_MarketParticipant.marketRole.type><receiver_MarketParticipant.mRID codingScheme="A01">${data.receiver}</receiver_MarketParticipant.mRID><receiver_MarketParticipant.marketRole.type>${data.receiverRole}</receiver_MarketParticipant.marketRole.type><received_MarketDocument.mRID>${data.mrid}</received_MarketDocument.mRID><reason><code>A01</code></reason></Acknowledgement_MarketDocument>`.trim();
+    
+    return `<?xml version="1.0" encoding="UTF-8"?>
+<Acknowledgement_MarketDocument xmlns="urn:iec62325.351:tc57wg16:451-1:acknowledgementdocument:7:0">
+\t<mRID>${generateUUID()}</mRID>
+\t<createdDateTime>${time}</createdDateTime>
+\t<sender_MarketParticipant.mRID codingScheme="A01">${data.sender}</sender_MarketParticipant.mRID>
+\t<sender_MarketParticipant.marketRole.type>${data.senderRole}</sender_MarketParticipant.marketRole.type>
+\t<receiver_MarketParticipant.mRID codingScheme="A01">${data.receiver}</receiver_MarketParticipant.mRID>
+\t<receiver_MarketParticipant.marketRole.type>${data.receiverRole}</receiver_MarketParticipant.marketRole.type>
+\t<received_MarketDocument.mRID>${data.docId}</received_MarketDocument.mRID>
+\t<received_MarketDocument.revisionNumber>${data.docRev}</received_MarketDocument.revisionNumber>
+\t<reason>
+\t\t<code>A01</code>
+\t</reason>
+</Acknowledgement_MarketDocument>`.trim();
   }
 };
