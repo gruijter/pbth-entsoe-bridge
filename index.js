@@ -1,5 +1,5 @@
 /**
- * Power by the Hour - ENTSO-E Energy Bridge (v3.27 Always SOAP)
+ * Power by the Hour - ENTSO-E Energy Bridge (v3.28 Strict XML Copy)
  *
  * API ENDPOINTS:
  * GET /?zone=[EIC_CODE]&key=[AUTH_KEY]     -> Get specific zone prices
@@ -80,56 +80,54 @@ export default {
       console.log("HEADERS:", JSON.stringify(Object.fromEntries(request.headers)));
       
       try {
-        const contentType = request.headers.get("content-type") || "";
-        // Removed: Empty Body Shortcut. We now ALWAYS send SOAP.
-
-        // REAL DATA PROCESSING
+        // 1. ALWAYS READ BODY (Even if empty, we need to consume stream)
         const xmlData = await request.text();
+        const contentLength = xmlData.length;
         
-        console.log("RAW XML BODY (First 1000 chars):");
-        console.log(xmlData.substring(0, 1000));
+        console.log(`RECEIVED BODY LENGTH: ${contentLength}`);
+        if (contentLength > 0) {
+             console.log("RAW XML BODY (First 500 chars):");
+             console.log(xmlData.substring(0, 500));
+        } else {
+             console.log("ACTION: Empty Body (Ping/Test).");
+        }
 
-        // Fallback Logic for Parsing
-        const mrid = getTagValue(xmlData, "mRID"); 
-        const docId = mrid ? mrid : "FALLBACK-" + Date.now();
-        console.log(`PARSED [mRID]: '${mrid}' -> Using: '${docId}'`);
-        
-        const rev = getTagValue(xmlData, "revisionNumber");
-        const docRev = rev ? rev : "1";
-        console.log(`PARSED [revisionNumber]: '${rev}' -> Using: '${docRev}'`);
-        
-        // Asynchronous Data Processing (only if data is substantial)
-        if (xmlData.length > 50) {
+        // 2. PROCESS DATA (Only if it looks like real data)
+        if (contentLength > 50) {
           ctx.waitUntil(this.processData(xmlData, env, STORAGE_PREFIX));
         }
 
-        // GENERATE RESPONSE (IEC 62325-504 ResponseMessage)
-        // Always wrapped in SOAP Envelope, regardless of input
+        // 3. GENERATE STRICT RESPONSE (IEC 62325-504 ResponseMessage)
+        // This matches exactly the XML structure from the Documentation Example.
+        // NOTE: We do NOT sign the response (no private key), but usually ACK doesn't require signature.
+        
         const responseXml = `<?xml version="1.0" encoding="UTF-8"?>
-<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope">
-  <soap:Header/>
-  <soap:Body>
+<SOAP-ENV:Envelope xmlns:SOAP-ENV="http://www.w3.org/2003/05/soap-envelope" SOAP-ENV:encodingStyle="http://www.w3.org/2001/12/soap-encoding">
+  <SOAP-ENV:Body>
     <msg:ResponseMessage xmlns:msg="http://iec.ch/TC57/2011/schema/message">
       <msg:Header>
         <msg:Verb>create</msg:Verb>
-        <msg:Noun>Acknowledgement</msg:Noun>
+        <msg:Noun>ETP-DOCUMENT</msg:Noun>
         <msg:Context>PRODUCTION</msg:Context>
-        <msg:AckRequired>false</msg:AckRequired>
+        <msg:AckRequired>true</msg:AckRequired>
       </msg:Header>
       <msg:Reply>
         <msg:Result>OK</msg:Result>
       </msg:Reply>
     </msg:ResponseMessage>
-  </soap:Body>
-</soap:Envelope>`;
+  </SOAP-ENV:Body>
+</SOAP-ENV:Envelope>`;
 
-        console.log("ACTION: Sending IEC 62325-504 ResponseMessage (SOAP).");
+        console.log("ACTION: Sending Strict ResponseMessage (SOAP).");
         console.log(responseXml);
         console.log(">>> REQUEST END <<<\n");
 
+        // RETURN WITH CORRECT CONTENT-TYPE
         return new Response(responseXml, { 
             status: 200, 
-            headers: { "Content-Type": "application/soap+xml" } 
+            headers: { 
+                "Content-Type": "application/soap+xml" 
+            } 
         });
 
       } catch (err) {
@@ -182,7 +180,7 @@ export default {
       const ratioToday = zones.length > 0 ? (zones.filter(z => z.is_complete_today).length / zones.length) : 0;
       const ratioTomorrow = zones.length > 0 ? (zones.filter(z => z.is_complete_tomorrow).length / zones.length) : 0;
       return new Response(JSON.stringify({ 
-          bridge: "PBTH Energy Bridge Pro (v3.27 Always SOAP)", 
+          bridge: "PBTH Energy Bridge Pro (v3.28 Strict XML)", 
           summary: { 
               total_zones: zones.length, 
               complete_today: Number(ratioToday.toFixed(2)), 
@@ -200,7 +198,7 @@ export default {
         if (!value) return new Response(JSON.stringify({ error: "Zone not found" }), { status: 404 });
         return new Response(JSON.stringify({ zone, name: metadata?.name || ZONE_NAMES[zone] || "N/A", updated: metadata?.updated, points: metadata?.count, res: `${metadata?.res}m`, data: JSON.parse(value) }, null, 2), { headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*", "Cache-Control": "public, max-age=300" } });
     }
-    return new Response("PBTH Energy Bridge v3.27 Online", { status: 200 });
+    return new Response("PBTH Energy Bridge v3.28 Online", { status: 200 });
   },
 
   async scheduled(event, env, ctx) {
