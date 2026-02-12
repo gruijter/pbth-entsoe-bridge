@@ -1,5 +1,5 @@
 /**
- * Power by the Hour - ENTSO-E Energy Bridge (v3.22 Empty Body Fix)
+ * Power by the Hour - ENTSO-E Energy Bridge (v3.24 Paranoid Logging)
  *
  * API ENDPOINTS:
  * GET /?zone=[EIC_CODE]&key=[AUTH_KEY]     -> Get specific zone prices
@@ -30,66 +30,35 @@
 
 const ZONE_NAMES = {
   // --- West & Noord Europa ---
-  "10YNL----------L": "Netherlands",
-  "10YBE----------2": "Belgium",
-  "10YFR-RTE------C": "France",
-  "10Y1001A1001A82H": "Germany-Luxembourg",
-  "10Y1001A1001A59C": "Germany (Amprion Area)",
-  "10YAT-APG------L": "Austria",
-  "10YCH-SWISSGRIDZ": "Switzerland",
-  "10Y1001A1001A92E": "United Kingdom",
-  "10Y1001A1001A016": "Ireland (SEM)",
+  "10YNL----------L": "Netherlands", "10YBE----------2": "Belgium", "10YFR-RTE------C": "France",
+  "10Y1001A1001A82H": "Germany-Luxembourg", "10Y1001A1001A59C": "Germany (Amprion Area)",
+  "10YAT-APG------L": "Austria", "10YCH-SWISSGRIDZ": "Switzerland",
+  "10Y1001A1001A92E": "United Kingdom", "10Y1001A1001A016": "Ireland (SEM)",
 
   // --- Scandinavië & Baltics ---
-  "10YDK-1--------W": "Denmark DK1", 
-  "10YDK-2--------M": "Denmark DK2",
-  "10YFI-1--------U": "Finland",
-  "10YNO-1--------2": "Norway NO1 (Oslo)", 
-  "10YNO-2--------T": "Norway NO2 (Kristiansand)",
-  "10YNO-3--------J": "Norway NO3 (Trondheim)", 
-  "10YNO-4--------9": "Norway NO4 (Tromsø)",
-  "10YNO-5--------E": "Norway NO5 (Bergen)", 
-  "10Y1001A1001A48H": "Norway NO5 (Bergen)",
+  "10YDK-1--------W": "Denmark DK1", "10YDK-2--------M": "Denmark DK2", "10YFI-1--------U": "Finland",
+  "10YNO-1--------2": "Norway NO1 (Oslo)", "10YNO-2--------T": "Norway NO2 (Kristiansand)",
+  "10YNO-3--------J": "Norway NO3 (Trondheim)", "10YNO-4--------9": "Norway NO4 (Tromsø)",
+  "10YNO-5--------E": "Norway NO5 (Bergen)", "10Y1001A1001A48H": "Norway NO5 (Bergen)",
   "50Y0JVU59B4JWQCU": "Norway NO2 North Sea Link",
-  "10Y1001A1001A44P": "Sweden SE1",
-  "10Y1001A1001A45N": "Sweden SE2", 
-  "10Y1001A1001A46L": "Sweden SE3", 
-  "10Y1001A1001A47J": "Sweden SE4",
-  "10Y1001A1001A39I": "Estonia", 
-  "10YLV-1001A00074": "Latvia", 
-  "10YLT-1001A0008Q": "Lithuania",
+  "10Y1001A1001A44P": "Sweden SE1", "10Y1001A1001A45N": "Sweden SE2", 
+  "10Y1001A1001A46L": "Sweden SE3", "10Y1001A1001A47J": "Sweden SE4",
+  "10Y1001A1001A39I": "Estonia", "10YLV-1001A00074": "Latvia", "10YLT-1001A0008Q": "Lithuania",
 
   // --- Zuid Europa ---
-  "10YES-REE------0": "Spain", 
-  "10YPT-REN------W": "Portugal",
-  "10YGR-HTSO-----Y": "Greece",
-  "10YIT-GRTN-----B": "Italy (National)",
-  "10Y1001A1001A73I": "Italy North",
-  "10Y1001A1001A70O": "Italy Centre-North",
-  "10Y1001A1001A71M": "Italy Centre-South",
-  "10Y1001A1001A74G": "Italy South",
-  "10Y1001A1001A75E": "Italy Sicily",
-  "10Y1001A1001A885": "Italy Sardinia",
-  "10Y1001A1001A893": "Italy Rossano",
+  "10YES-REE------0": "Spain", "10YPT-REN------W": "Portugal", "10YGR-HTSO-----Y": "Greece",
+  "10YIT-GRTN-----B": "Italy (National)", "10Y1001A1001A73I": "Italy North",
+  "10Y1001A1001A70O": "Italy Centre-North", "10Y1001A1001A71M": "Italy Centre-South",
+  "10Y1001A1001A74G": "Italy South", "10Y1001A1001A75E": "Italy Sicily",
+  "10Y1001A1001A885": "Italy Sardinia", "10Y1001A1001A893": "Italy Rossano",
 
   // --- Centraal & Oost Europa ---
-  "10YPL-AREA-----S": "Poland", 
-  "10YCZ-CEPS-----N": "Czech Republic",
-  "10YSK-SEPS-----K": "Slovakia",
-  "10YHU-MAVIR----U": "Hungary", 
-  "10YRO-TEL------P": "Romania", 
-  "10YSI-ELES-----O": "Slovenia", 
-  "10YHR-HEP------M": "Croatia", 
-  "10YCA-BULGARIA-R": "Bulgaria",
-  "10YCS-CG-TSO---S": "Montenegro", 
-  "10YCS-SERBIATSOV": "Serbia",
-  "10YMK-MEPSO----8": "North Macedonia",
-  "10YBA-JPCC-----D": "Bosnia and Herzegovina",
-  "10YAL-KESH-----5": "Albania",
-  "10Y1001C--00100H": "Kosovo",
-  "10Y1001C--00096J": "Moldova",
-  "10Y1001C--000182": "Ukraine (IPS)",
-  "10YTR-TEIAS----W": "Turkey"
+  "10YPL-AREA-----S": "Poland", "10YCZ-CEPS-----N": "Czech Republic", "10YSK-SEPS-----K": "Slovakia",
+  "10YHU-MAVIR----U": "Hungary", "10YRO-TEL------P": "Romania", "10YSI-ELES-----O": "Slovenia",
+  "10YHR-HEP------M": "Croatia", "10YCA-BULGARIA-R": "Bulgaria", "10YCS-CG-TSO---S": "Montenegro",
+  "10YCS-SERBIATSOV": "Serbia", "10YMK-MEPSO----8": "North Macedonia", "10YBA-JPCC-----D": "Bosnia and Herzegovina",
+  "10YAL-KESH-----5": "Albania", "10Y1001C--00100H": "Kosovo", "10Y1001C--00096J": "Moldova",
+  "10Y1001C--000182": "Ukraine (IPS)", "10YTR-TEIAS----W": "Turkey"
 };
 
 // 1. SAFE UUID GENERATOR
@@ -100,11 +69,13 @@ const generateUUID = () => {
   });
 };
 
-// Helper for robust XML extraction
+// IMPROVED XML EXTRACTOR (Handles Namespaces & Attributes)
 const getTagValue = (xml, tagName) => {
-  const regex = new RegExp(`<[^>]*${tagName}[^>]*>([^<]+)<\\/[^>]*${tagName}>`, "i");
+  // Matches <TagName>...</TagName> OR <ns:TagName>...</ns:TagName>
+  // Case insensitive, robust against attributes
+  const regex = new RegExp(`<([a-zA-Z0-9_\\-]*:)?${tagName}(?:\\s[^>]*)?>([^<]+)<\\/([a-zA-Z0-9_\\-]*:)?${tagName}>`, "i");
   const match = xml.match(regex);
-  return match ? match[1].trim() : null;
+  return match ? match[2].trim() : null;
 };
 
 export default {
@@ -117,6 +88,12 @@ export default {
 
     // --- POST HANDLING (ENTSO-E PUSH) ---
     if (request.method === "POST") {
+      
+      // *** DEBUG: LOG INCOMING REQUEST DETAILS ***
+      console.log("\n>>> INCOMING POST REQUEST START <<<");
+      console.log("HEADERS:", JSON.stringify(Object.fromEntries(request.headers)));
+      // *******************************************
+
       let ackData = { 
         mrid: "PING-" + generateUUID(), 
         sender: "10X1001A1001A450", senderRole: "A32", 
@@ -131,20 +108,28 @@ export default {
         const isSoap = contentType.includes("soap") || contentType.includes("xml");
         
         // --- CASE 1: EMPTY PING (Connection Check) ---
-        // If content-length is 0 or missing, it's a heartbeat/check.
-        // Returning a full XML ACK for "UNKNOWN" document is invalid.
-        // Just return 200 OK.
         if (!contentLength || contentLength === "0") {
-             console.log("--- [ENTSO-E LOG] EMPTY PING RECEIVED -> SENDING 200 OK ---");
+             console.log("ACTION: Empty Body detected -> Returning 200 OK.");
+             console.log(">>> REQUEST END <<<\n");
              return new Response(null, { status: 200 });
         }
 
         // --- CASE 2: REAL DATA ---
         const xmlData = await request.text();
         
-        // Extract Data
-        const mrid = getTagValue(xmlData, "mRID"); if (mrid) ackData.docId = mrid;
-        const rev = getTagValue(xmlData, "revisionNumber"); if (rev) ackData.docRev = rev;
+        // *** DEBUG: LOG RAW XML SAMPLE ***
+        console.log("RAW XML BODY (First 1000 chars):");
+        console.log(xmlData.substring(0, 1000));
+        // *********************************
+
+        // Extract Data & Log Results
+        const mrid = getTagValue(xmlData, "mRID"); 
+        console.log(`PARSED [mRID]: '${mrid}'`);
+        if (mrid) ackData.docId = mrid;
+        
+        const rev = getTagValue(xmlData, "revisionNumber"); 
+        console.log(`PARSED [revisionNumber]: '${rev}'`);
+        if (rev) ackData.docRev = rev;
         
         const sender = getTagValue(xmlData, "sender_MarketParticipant.mRID"); if (sender) ackData.receiver = sender;
         const senderRole = getTagValue(xmlData, "sender_MarketParticipant.marketRole.type"); if (senderRole) ackData.receiverRole = senderRole;
@@ -161,6 +146,7 @@ export default {
 
         // IF INPUT WAS SOAP -> WRAP OUTPUT IN SOAP
         if (isSoap && contentType.includes("application/soap+xml")) {
+             console.log("ACTION: Wrapping Output in SOAP Envelope.");
              responseHeaders["Content-Type"] = "application/soap+xml";
              ackXml = `<?xml version="1.0" encoding="UTF-8"?>
 <soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope">
@@ -169,19 +155,20 @@ export default {
     ${ackXml.replace('<?xml version="1.0" encoding="UTF-8"?>', '').trim()}
   </soap:Body>
 </soap:Envelope>`;
+        } else {
+             console.log("ACTION: Sending Plain XML Response.");
         }
 
-        // *** EVIDENCE LOGGING ***
-        console.log("--- [ENTSO-E EVIDENCE LOG START] ---");
-        console.log(`RECEIVED CONTENT-TYPE: ${contentType}`);
-        console.log(`GENERATED RESPONSE (SOAP WRAPPED: ${isSoap}):`);
+        // *** DEBUG: LOG OUTGOING XML ***
+        console.log("FINAL OUTPUT XML:");
         console.log(ackXml);
-        console.log("--- [ENTSO-E EVIDENCE LOG END] ---");
+        console.log(">>> REQUEST END <<<\n");
+        // *******************************
 
         return new Response(ackXml, { status: 200, headers: responseHeaders });
 
       } catch (err) {
-        console.error("Handler error:", err);
+        console.error("!!! CRITICAL HANDLER ERROR !!!", err);
         const ackXml = this.generateAck(ackData);
         return new Response(ackXml, { status: 200, headers: { "Content-Type": "application/xml" } });
       }
@@ -240,7 +227,7 @@ export default {
       const ratioTomorrow = zones.length > 0 ? (zones.filter(z => z.is_complete_tomorrow).length / zones.length) : 0;
       
       return new Response(JSON.stringify({ 
-          bridge: "PBTH Energy Bridge Pro (v3.22 Empty Fix)", 
+          bridge: "PBTH Energy Bridge Pro (v3.24 Paranoid Log)", 
           summary: { 
               total_zones: zones.length, 
               complete_today: Number(ratioToday.toFixed(2)),
@@ -262,7 +249,7 @@ export default {
         }, null, 2), { headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*", "Cache-Control": "public, max-age=300" } });
     }
     
-    return new Response("PBTH Energy Bridge v3.22 Online", { status: 200 });
+    return new Response("PBTH Energy Bridge v3.24 Online", { status: 200 });
   },
 
   // 2. CRON SCHEDULED HANDLER
