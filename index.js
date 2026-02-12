@@ -1,5 +1,5 @@
 /**
- * Power by the Hour - ENTSO-E Energy Bridge (v3.26 Strict Documentation Compliance)
+ * Power by the Hour - ENTSO-E Energy Bridge (v3.27 Always SOAP)
  *
  * API ENDPOINTS:
  * GET /?zone=[EIC_CODE]&key=[AUTH_KEY]     -> Get specific zone prices
@@ -77,33 +77,34 @@ export default {
     // --- POST HANDLING ---
     if (request.method === "POST") {
       console.log("\n>>> INCOMING POST REQUEST START <<<");
+      console.log("HEADERS:", JSON.stringify(Object.fromEntries(request.headers)));
       
       try {
         const contentType = request.headers.get("content-type") || "";
-        const contentLength = request.headers.get("content-length");
-        const isSoap = contentType.includes("soap") || contentType.includes("xml");
-        
-        // CASE 1: EMPTY PING (Connection Check / Section 1 Validation)
-        // Doc Section 1: "sends a simple post request ... expects a return code different from HTTP 400"
-        if (!contentLength || contentLength === "0") {
-             console.log("ACTION: Empty Body detected -> Returning 200 OK (Compliant with Sec 1).");
-             return new Response(null, { status: 200 });
-        }
+        // Removed: Empty Body Shortcut. We now ALWAYS send SOAP.
 
-        // CASE 2: REAL DATA (Push)
+        // REAL DATA PROCESSING
         const xmlData = await request.text();
         
-        // Log Parsing for Debugging
+        console.log("RAW XML BODY (First 1000 chars):");
+        console.log(xmlData.substring(0, 1000));
+
+        // Fallback Logic for Parsing
         const mrid = getTagValue(xmlData, "mRID"); 
-        console.log(`PARSED [mRID]: '${mrid}'`);
+        const docId = mrid ? mrid : "FALLBACK-" + Date.now();
+        console.log(`PARSED [mRID]: '${mrid}' -> Using: '${docId}'`);
         
-        // Process Data Asynchronously
+        const rev = getTagValue(xmlData, "revisionNumber");
+        const docRev = rev ? rev : "1";
+        console.log(`PARSED [revisionNumber]: '${rev}' -> Using: '${docRev}'`);
+        
+        // Asynchronous Data Processing (only if data is substantial)
         if (xmlData.length > 50) {
           ctx.waitUntil(this.processData(xmlData, env, STORAGE_PREFIX));
         }
 
-        // GENERATE RESPONSE (Compliant with Section 5 Example)
-        // "ResponseMessage" with Result OK
+        // GENERATE RESPONSE (IEC 62325-504 ResponseMessage)
+        // Always wrapped in SOAP Envelope, regardless of input
         const responseXml = `<?xml version="1.0" encoding="UTF-8"?>
 <soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope">
   <soap:Header/>
@@ -124,6 +125,7 @@ export default {
 
         console.log("ACTION: Sending IEC 62325-504 ResponseMessage (SOAP).");
         console.log(responseXml);
+        console.log(">>> REQUEST END <<<\n");
 
         return new Response(responseXml, { 
             status: 200, 
@@ -180,7 +182,7 @@ export default {
       const ratioToday = zones.length > 0 ? (zones.filter(z => z.is_complete_today).length / zones.length) : 0;
       const ratioTomorrow = zones.length > 0 ? (zones.filter(z => z.is_complete_tomorrow).length / zones.length) : 0;
       return new Response(JSON.stringify({ 
-          bridge: "PBTH Energy Bridge Pro (v3.26 Strict Docs)", 
+          bridge: "PBTH Energy Bridge Pro (v3.27 Always SOAP)", 
           summary: { 
               total_zones: zones.length, 
               complete_today: Number(ratioToday.toFixed(2)), 
@@ -198,7 +200,7 @@ export default {
         if (!value) return new Response(JSON.stringify({ error: "Zone not found" }), { status: 404 });
         return new Response(JSON.stringify({ zone, name: metadata?.name || ZONE_NAMES[zone] || "N/A", updated: metadata?.updated, points: metadata?.count, res: `${metadata?.res}m`, data: JSON.parse(value) }, null, 2), { headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*", "Cache-Control": "public, max-age=300" } });
     }
-    return new Response("PBTH Energy Bridge v3.26 Online", { status: 200 });
+    return new Response("PBTH Energy Bridge v3.27 Online", { status: 200 });
   },
 
   async scheduled(event, env, ctx) {
