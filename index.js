@@ -1,5 +1,5 @@
 /**
- * Power by the Hour - ENTSO-E Energy Bridge (v3.25 Bulletproof Defaults)
+ * Power by the Hour - ENTSO-E Energy Bridge (v3.26 Strict Documentation Compliance)
  *
  * API ENDPOINTS:
  * GET /?zone=[EIC_CODE]&key=[AUTH_KEY]     -> Get specific zone prices
@@ -61,15 +61,6 @@ const ZONE_NAMES = {
   "10Y1001C--000182": "Ukraine (IPS)", "10YTR-TEIAS----W": "Turkey"
 };
 
-// 1. SAFE UUID GENERATOR
-const generateUUID = () => {
-  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
-    var r = Math.random() * 16 | 0, v = c == 'x' ? r : (r & 0x3 | 0x8);
-    return v.toString(16);
-  });
-};
-
-// IMPROVED XML EXTRACTOR (Namespace Robust)
 const getTagValue = (xml, tagName) => {
   const regex = new RegExp(`<([a-zA-Z0-9_\\-]*:)?${tagName}(?:\\s[^>]*)?>([^<]+)<\\/([a-zA-Z0-9_\\-]*:)?${tagName}>`, "i");
   const match = xml.match(regex);
@@ -85,92 +76,63 @@ export default {
 
     // --- POST HANDLING ---
     if (request.method === "POST") {
-      
       console.log("\n>>> INCOMING POST REQUEST START <<<");
-      console.log("HEADERS:", JSON.stringify(Object.fromEntries(request.headers)));
-
-      // Initialize with FALLBACK values to never return "UNKNOWN"
-      let ackData = { 
-        mrid: "PING-" + generateUUID(), 
-        sender: "10X1001A1001A450", senderRole: "A32", 
-        receiver: env.MY_EIC_CODE || "37XPBTH-DUMMY-1", receiverRole: "A39",
-        docId: "FALLBACK-" + Date.now(), 
-        docRev: "1" 
-      };
-
+      
       try {
         const contentType = request.headers.get("content-type") || "";
         const contentLength = request.headers.get("content-length");
         const isSoap = contentType.includes("soap") || contentType.includes("xml");
         
-        // CASE 1: EMPTY PING
+        // CASE 1: EMPTY PING (Connection Check / Section 1 Validation)
+        // Doc Section 1: "sends a simple post request ... expects a return code different from HTTP 400"
         if (!contentLength || contentLength === "0") {
-             console.log("ACTION: Empty Body detected -> Returning 200 OK.");
-             console.log(">>> REQUEST END <<<\n");
+             console.log("ACTION: Empty Body detected -> Returning 200 OK (Compliant with Sec 1).");
              return new Response(null, { status: 200 });
         }
 
-        // CASE 2: REAL DATA
+        // CASE 2: REAL DATA (Push)
         const xmlData = await request.text();
         
-        console.log("RAW XML BODY (First 1000 chars):");
-        console.log(xmlData.substring(0, 1000));
-
-        // Extract Data (With Fallback Logic)
+        // Log Parsing for Debugging
         const mrid = getTagValue(xmlData, "mRID"); 
-        if (mrid) {
-            ackData.docId = mrid;
-            console.log(`PARSED [mRID]: '${mrid}'`);
-        } else {
-            console.warn(`WARNING: Could not parse mRID. Using Fallback: ${ackData.docId}`);
-        }
+        console.log(`PARSED [mRID]: '${mrid}'`);
         
-        const rev = getTagValue(xmlData, "revisionNumber"); 
-        if (rev) {
-            ackData.docRev = rev;
-            console.log(`PARSED [revisionNumber]: '${rev}'`);
-        } else {
-            console.log(`PARSED [revisionNumber]: null -> FORCING DEFAULT '1'`);
-            ackData.docRev = "1"; 
-        }
-        
-        const sender = getTagValue(xmlData, "sender_MarketParticipant.mRID"); if (sender) ackData.receiver = sender;
-        const senderRole = getTagValue(xmlData, "sender_MarketParticipant.marketRole.type"); if (senderRole) ackData.receiverRole = senderRole;
-        const receiver = getTagValue(xmlData, "receiver_MarketParticipant.mRID"); if (receiver) ackData.sender = receiver;
-        const receiverRole = getTagValue(xmlData, "receiver_MarketParticipant.marketRole.type"); if (receiverRole) ackData.senderRole = receiverRole;
-
+        // Process Data Asynchronously
         if (xmlData.length > 50) {
           ctx.waitUntil(this.processData(xmlData, env, STORAGE_PREFIX));
         }
 
-        // GENERATE RESPONSE
-        let ackXml = this.generateAck(ackData);
-        let responseHeaders = { "Content-Type": "application/xml" };
-
-        if (isSoap && contentType.includes("application/soap+xml")) {
-             console.log("ACTION: Wrapping Output in SOAP Envelope.");
-             responseHeaders["Content-Type"] = "application/soap+xml";
-             ackXml = `<?xml version="1.0" encoding="UTF-8"?>
+        // GENERATE RESPONSE (Compliant with Section 5 Example)
+        // "ResponseMessage" with Result OK
+        const responseXml = `<?xml version="1.0" encoding="UTF-8"?>
 <soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope">
   <soap:Header/>
   <soap:Body>
-    ${ackXml.replace('<?xml version="1.0" encoding="UTF-8"?>', '').trim()}
+    <msg:ResponseMessage xmlns:msg="http://iec.ch/TC57/2011/schema/message">
+      <msg:Header>
+        <msg:Verb>create</msg:Verb>
+        <msg:Noun>Acknowledgement</msg:Noun>
+        <msg:Context>PRODUCTION</msg:Context>
+        <msg:AckRequired>false</msg:AckRequired>
+      </msg:Header>
+      <msg:Reply>
+        <msg:Result>OK</msg:Result>
+      </msg:Reply>
+    </msg:ResponseMessage>
   </soap:Body>
 </soap:Envelope>`;
-        } else {
-             console.log("ACTION: Sending Plain XML Response.");
-        }
 
-        console.log("FINAL OUTPUT XML:");
-        console.log(ackXml);
-        console.log(">>> REQUEST END <<<\n");
+        console.log("ACTION: Sending IEC 62325-504 ResponseMessage (SOAP).");
+        console.log(responseXml);
 
-        return new Response(ackXml, { status: 200, headers: responseHeaders });
+        return new Response(responseXml, { 
+            status: 200, 
+            headers: { "Content-Type": "application/soap+xml" } 
+        });
 
       } catch (err) {
         console.error("!!! CRITICAL HANDLER ERROR !!!", err);
-        const ackXml = this.generateAck(ackData);
-        return new Response(ackXml, { status: 200, headers: { "Content-Type": "application/xml" } });
+        return new Response(null, { status: 500 });
       }
     }
 
@@ -218,7 +180,7 @@ export default {
       const ratioToday = zones.length > 0 ? (zones.filter(z => z.is_complete_today).length / zones.length) : 0;
       const ratioTomorrow = zones.length > 0 ? (zones.filter(z => z.is_complete_tomorrow).length / zones.length) : 0;
       return new Response(JSON.stringify({ 
-          bridge: "PBTH Energy Bridge Pro (v3.25 Bulletproof)", 
+          bridge: "PBTH Energy Bridge Pro (v3.26 Strict Docs)", 
           summary: { 
               total_zones: zones.length, 
               complete_today: Number(ratioToday.toFixed(2)), 
@@ -236,7 +198,7 @@ export default {
         if (!value) return new Response(JSON.stringify({ error: "Zone not found" }), { status: 404 });
         return new Response(JSON.stringify({ zone, name: metadata?.name || ZONE_NAMES[zone] || "N/A", updated: metadata?.updated, points: metadata?.count, res: `${metadata?.res}m`, data: JSON.parse(value) }, null, 2), { headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*", "Cache-Control": "public, max-age=300" } });
     }
-    return new Response("PBTH Energy Bridge v3.25 Online", { status: 200 });
+    return new Response("PBTH Energy Bridge v3.26 Online", { status: 200 });
   },
 
   async scheduled(event, env, ctx) {
@@ -312,24 +274,5 @@ export default {
             }
         }
     } catch (e) { console.error("Async error:", e); }
-  },
-
-  generateAck(data) {
-    const time = new Date().toISOString().split('.')[0] + "Z";
-    
-    return `<?xml version="1.0" encoding="UTF-8"?>
-<Acknowledgement_MarketDocument xmlns="urn:iec62325.351:tc57wg16:451-1:acknowledgementdocument:7:0">
-\t<mRID>${generateUUID()}</mRID>
-\t<createdDateTime>${time}</createdDateTime>
-\t<sender_MarketParticipant.mRID codingScheme="A01">${data.sender}</sender_MarketParticipant.mRID>
-\t<sender_MarketParticipant.marketRole.type>${data.senderRole}</sender_MarketParticipant.marketRole.type>
-\t<receiver_MarketParticipant.mRID codingScheme="A01">${data.receiver}</receiver_MarketParticipant.mRID>
-\t<receiver_MarketParticipant.marketRole.type>${data.receiverRole}</receiver_MarketParticipant.marketRole.type>
-\t<received_MarketDocument.mRID>${data.docId}</received_MarketDocument.mRID>
-\t<received_MarketDocument.revisionNumber>${data.docRev}</received_MarketDocument.revisionNumber>
-\t<reason>
-\t\t<code>A01</code>
-\t</reason>
-</Acknowledgement_MarketDocument>`.trim();
   }
 };
