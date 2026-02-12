@@ -1,5 +1,5 @@
 /**
- * Power by the Hour - ENTSO-E Energy Bridge (v3.21 Extended Zone names with Evidence Logging)
+ * Power by the Hour - ENTSO-E Energy Bridge (v3.21 SOAP Support
  *
  * API ENDPOINTS:
  * GET /?zone=[EIC_CODE]&key=[AUTH_KEY]     -> Get specific zone prices
@@ -29,7 +29,7 @@
  */
 
 const ZONE_NAMES = {
-  // --- West & North Europe ---
+  // --- West & Noord Europa ---
   "10YNL----------L": "Netherlands",
   "10YBE----------2": "Belgium",
   "10YFR-RTE------C": "France",
@@ -59,7 +59,7 @@ const ZONE_NAMES = {
   "10YLV-1001A00074": "Latvia", 
   "10YLT-1001A0008Q": "Lithuania",
 
-  // --- South Europe ---
+  // --- Zuid Europa ---
   "10YES-REE------0": "Spain", 
   "10YPT-REN------W": "Portugal",
   "10YGR-HTSO-----Y": "Greece",
@@ -72,7 +72,7 @@ const ZONE_NAMES = {
   "10Y1001A1001A885": "Italy Sardinia",
   "10Y1001A1001A893": "Italy Rossano",
 
-  // --- Central & East Europe ---
+  // --- Centraal & Oost Europa ---
   "10YPL-AREA-----S": "Poland", 
   "10YCZ-CEPS-----N": "Czech Republic",
   "10YSK-SEPS-----K": "Slovakia",
@@ -126,7 +126,10 @@ export default {
       };
 
       try {
+        const contentType = request.headers.get("content-type") || "";
+        const isSoap = contentType.includes("soap") || contentType.includes("xml");
         const contentLength = request.headers.get("content-length");
+        
         if (contentLength && contentLength !== "0") {
             const xmlData = await request.text();
             
@@ -144,23 +147,33 @@ export default {
             }
         }
 
-        // GENERATE ACK XML
-        const ackXml = this.generateAck(ackData);
+        // GENERATE ACK XML (Plain)
+        let ackXml = this.generateAck(ackData);
+        let responseHeaders = { "Content-Type": "application/xml" };
 
-        // *** EVIDENCE LOGGING FOR HELPDESK ***
+        // IF INPUT WAS SOAP -> WRAP OUTPUT IN SOAP
+        if (isSoap && contentType.includes("application/soap+xml")) {
+             responseHeaders["Content-Type"] = "application/soap+xml";
+             ackXml = `<?xml version="1.0" encoding="UTF-8"?>
+<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope">
+  <soap:Header/>
+  <soap:Body>
+    ${ackXml.replace('<?xml version="1.0" encoding="UTF-8"?>', '').trim()}
+  </soap:Body>
+</soap:Envelope>`;
+        }
+
+        // *** EVIDENCE LOGGING ***
         console.log("--- [ENTSO-E EVIDENCE LOG START] ---");
-        console.log(`RECEIVED DOC ID: ${ackData.docId}`);
-        console.log(`RECEIVED REVISION: ${ackData.docRev}`);
-        console.log("GENERATED ACKNOWLEDGMENT XML:");
+        console.log(`RECEIVED CONTENT-TYPE: ${contentType}`);
+        console.log(`GENERATED RESPONSE (SOAP WRAPPED: ${isSoap}):`);
         console.log(ackXml);
         console.log("--- [ENTSO-E EVIDENCE LOG END] ---");
-        // *************************************
 
-        return new Response(ackXml, { status: 200, headers: { "Content-Type": "application/xml" } });
+        return new Response(ackXml, { status: 200, headers: responseHeaders });
 
       } catch (err) {
         console.error("Handler error:", err);
-        // Even on error, generate a basic ACK to keep connection alive if possible
         const ackXml = this.generateAck(ackData);
         return new Response(ackXml, { status: 200, headers: { "Content-Type": "application/xml" } });
       }
@@ -219,7 +232,7 @@ export default {
       const ratioTomorrow = zones.length > 0 ? (zones.filter(z => z.is_complete_tomorrow).length / zones.length) : 0;
       
       return new Response(JSON.stringify({ 
-          bridge: "PBTH Energy Bridge Pro (v3.21)", 
+          bridge: "PBTH Energy Bridge Pro (v3.21 SOAP)", 
           summary: { 
               total_zones: zones.length, 
               complete_today: Number(ratioToday.toFixed(2)),
@@ -241,7 +254,7 @@ export default {
         }, null, 2), { headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*", "Cache-Control": "public, max-age=300" } });
     }
     
-    return new Response("PBTH Energy Bridge v3.20 Online", { status: 200 });
+    return new Response("PBTH Energy Bridge v3.21 Online", { status: 200 });
   },
 
   // 2. CRON SCHEDULED HANDLER
