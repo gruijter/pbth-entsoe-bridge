@@ -1,5 +1,5 @@
 /**
- * Power by the Hour - ENTSO-E Energy Bridge (v3.21 SOAP Support
+ * Power by the Hour - ENTSO-E Energy Bridge (v3.22 Empty Body Fix)
  *
  * API ENDPOINTS:
  * GET /?zone=[EIC_CODE]&key=[AUTH_KEY]     -> Get specific zone prices
@@ -127,24 +127,32 @@ export default {
 
       try {
         const contentType = request.headers.get("content-type") || "";
-        const isSoap = contentType.includes("soap") || contentType.includes("xml");
         const contentLength = request.headers.get("content-length");
+        const isSoap = contentType.includes("soap") || contentType.includes("xml");
         
-        if (contentLength && contentLength !== "0") {
-            const xmlData = await request.text();
-            
-            // Extract Data
-            const mrid = getTagValue(xmlData, "mRID"); if (mrid) ackData.docId = mrid;
-            const rev = getTagValue(xmlData, "revisionNumber"); if (rev) ackData.docRev = rev;
-            
-            const sender = getTagValue(xmlData, "sender_MarketParticipant.mRID"); if (sender) ackData.receiver = sender;
-            const senderRole = getTagValue(xmlData, "sender_MarketParticipant.marketRole.type"); if (senderRole) ackData.receiverRole = senderRole;
-            const receiver = getTagValue(xmlData, "receiver_MarketParticipant.mRID"); if (receiver) ackData.sender = receiver;
-            const receiverRole = getTagValue(xmlData, "receiver_MarketParticipant.marketRole.type"); if (receiverRole) ackData.senderRole = receiverRole;
+        // --- CASE 1: EMPTY PING (Connection Check) ---
+        // If content-length is 0 or missing, it's a heartbeat/check.
+        // Returning a full XML ACK for "UNKNOWN" document is invalid.
+        // Just return 200 OK.
+        if (!contentLength || contentLength === "0") {
+             console.log("--- [ENTSO-E LOG] EMPTY PING RECEIVED -> SENDING 200 OK ---");
+             return new Response(null, { status: 200 });
+        }
 
-            if (xmlData.length > 50) {
-              ctx.waitUntil(this.processData(xmlData, env, STORAGE_PREFIX));
-            }
+        // --- CASE 2: REAL DATA ---
+        const xmlData = await request.text();
+        
+        // Extract Data
+        const mrid = getTagValue(xmlData, "mRID"); if (mrid) ackData.docId = mrid;
+        const rev = getTagValue(xmlData, "revisionNumber"); if (rev) ackData.docRev = rev;
+        
+        const sender = getTagValue(xmlData, "sender_MarketParticipant.mRID"); if (sender) ackData.receiver = sender;
+        const senderRole = getTagValue(xmlData, "sender_MarketParticipant.marketRole.type"); if (senderRole) ackData.receiverRole = senderRole;
+        const receiver = getTagValue(xmlData, "receiver_MarketParticipant.mRID"); if (receiver) ackData.sender = receiver;
+        const receiverRole = getTagValue(xmlData, "receiver_MarketParticipant.marketRole.type"); if (receiverRole) ackData.senderRole = receiverRole;
+
+        if (xmlData.length > 50) {
+          ctx.waitUntil(this.processData(xmlData, env, STORAGE_PREFIX));
         }
 
         // GENERATE ACK XML (Plain)
@@ -232,7 +240,7 @@ export default {
       const ratioTomorrow = zones.length > 0 ? (zones.filter(z => z.is_complete_tomorrow).length / zones.length) : 0;
       
       return new Response(JSON.stringify({ 
-          bridge: "PBTH Energy Bridge Pro (v3.21 SOAP)", 
+          bridge: "PBTH Energy Bridge Pro (v3.22 Empty Fix)", 
           summary: { 
               total_zones: zones.length, 
               complete_today: Number(ratioToday.toFixed(2)),
@@ -254,7 +262,7 @@ export default {
         }, null, 2), { headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*", "Cache-Control": "public, max-age=300" } });
     }
     
-    return new Response("PBTH Energy Bridge v3.21 Online", { status: 200 });
+    return new Response("PBTH Energy Bridge v3.22 Online", { status: 200 });
   },
 
   // 2. CRON SCHEDULED HANDLER
