@@ -1,5 +1,5 @@
 /**
- * Power by the Hour - ENTSO-E Energy Bridge (v3.20 Evidence Logging)
+ * Power by the Hour - ENTSO-E Energy Bridge (v3.21 Extended Zone names with Evidence Logging)
  *
  * API ENDPOINTS:
  * GET /?zone=[EIC_CODE]&key=[AUTH_KEY]     -> Get specific zone prices
@@ -29,21 +29,67 @@
  */
 
 const ZONE_NAMES = {
-  "10YNL----------L": "Netherlands", "10YBE----------2": "Belgium", "10YFR-RTE------C": "France",
-  "10Y1001A1001A82H": "Germany-Luxembourg", "10YAT-APG------L": "Austria", "10YCH-SWISSGRIDZ": "Switzerland",
-  "10YDK-1--------W": "Denmark DK1", "10YDK-2--------M": "Denmark DK2", "10YFI-1--------U": "Finland",
-  "10YNO-1--------2": "Norway NO1 (Oslo)", "10YNO-2--------T": "Norway NO2 (Kristiansand)",
-  "10YNO-3--------J": "Norway NO3 (Trondheim)", "10YNO-4--------9": "Norway NO4 (Tromsø)",
-  "10YNO-5--------E": "Norway NO5 (Bergen)", "10Y1001A1001A48H": "Norway NO5 (Bergen)",
-  "50Y0JVU59B4JWQCU": "Norway NO2 North Sea Link", "10Y1001A1001A44P": "Sweden SE1",
-  "10Y1001A1001A45N": "Sweden SE2", "10Y1001A1001A46L": "Sweden SE3", "10Y1001A1001A47J": "Sweden SE4",
-  "10Y1001A1001A92E": "United Kingdom", "10Y1001A1001A39I": "Estonia", "10YLV-1001A00074": "Latvia",
-  "10YLT-1001A0008Q": "Lithuania", "10YPL-AREA-----S": "Poland", "10YCZ-CEPS-----N": "Czech Republic",
-  "10YHU-MAVIR----U": "Hungary", "10YRO-TEL------P": "Romania", "10YSK-SEPS-----K": "Slovakia",
-  "10YSI-ELES-----O": "Slovenia", "10YHR-HEP------M": "Croatia", "10YCA-BULGARIA-R": "Bulgaria",
-  "10YCS-CG-TSO---S": "Montenegro", "10YCS-SERBIATSOV": "Serbia", "10Y1001C--000182": "Ukraine (IPS)",
-  "10YES-REE------0": "Spain", "10YPT-REN------W": "Portugal", "10YIT-GRTN-----B": "Italy (National)",
-  "10Y1001A1001A73I": "Italy North", "10YGR-HTSO-----Y": "Greece", "10Y1001A1001A59C": "Germany (Amprion Area)"
+  // --- West & North Europe ---
+  "10YNL----------L": "Netherlands",
+  "10YBE----------2": "Belgium",
+  "10YFR-RTE------C": "France",
+  "10Y1001A1001A82H": "Germany-Luxembourg",
+  "10Y1001A1001A59C": "Germany (Amprion Area)",
+  "10YAT-APG------L": "Austria",
+  "10YCH-SWISSGRIDZ": "Switzerland",
+  "10Y1001A1001A92E": "United Kingdom",
+  "10Y1001A1001A016": "Ireland (SEM)",
+
+  // --- Scandinavië & Baltics ---
+  "10YDK-1--------W": "Denmark DK1", 
+  "10YDK-2--------M": "Denmark DK2",
+  "10YFI-1--------U": "Finland",
+  "10YNO-1--------2": "Norway NO1 (Oslo)", 
+  "10YNO-2--------T": "Norway NO2 (Kristiansand)",
+  "10YNO-3--------J": "Norway NO3 (Trondheim)", 
+  "10YNO-4--------9": "Norway NO4 (Tromsø)",
+  "10YNO-5--------E": "Norway NO5 (Bergen)", 
+  "10Y1001A1001A48H": "Norway NO5 (Bergen)",
+  "50Y0JVU59B4JWQCU": "Norway NO2 North Sea Link",
+  "10Y1001A1001A44P": "Sweden SE1",
+  "10Y1001A1001A45N": "Sweden SE2", 
+  "10Y1001A1001A46L": "Sweden SE3", 
+  "10Y1001A1001A47J": "Sweden SE4",
+  "10Y1001A1001A39I": "Estonia", 
+  "10YLV-1001A00074": "Latvia", 
+  "10YLT-1001A0008Q": "Lithuania",
+
+  // --- South Europe ---
+  "10YES-REE------0": "Spain", 
+  "10YPT-REN------W": "Portugal",
+  "10YGR-HTSO-----Y": "Greece",
+  "10YIT-GRTN-----B": "Italy (National)",
+  "10Y1001A1001A73I": "Italy North",
+  "10Y1001A1001A70O": "Italy Centre-North",
+  "10Y1001A1001A71M": "Italy Centre-South",
+  "10Y1001A1001A74G": "Italy South",
+  "10Y1001A1001A75E": "Italy Sicily",
+  "10Y1001A1001A885": "Italy Sardinia",
+  "10Y1001A1001A893": "Italy Rossano",
+
+  // --- Central & East Europe ---
+  "10YPL-AREA-----S": "Poland", 
+  "10YCZ-CEPS-----N": "Czech Republic",
+  "10YSK-SEPS-----K": "Slovakia",
+  "10YHU-MAVIR----U": "Hungary", 
+  "10YRO-TEL------P": "Romania", 
+  "10YSI-ELES-----O": "Slovenia", 
+  "10YHR-HEP------M": "Croatia", 
+  "10YCA-BULGARIA-R": "Bulgaria",
+  "10YCS-CG-TSO---S": "Montenegro", 
+  "10YCS-SERBIATSOV": "Serbia",
+  "10YMK-MEPSO----8": "North Macedonia",
+  "10YBA-JPCC-----D": "Bosnia and Herzegovina",
+  "10YAL-KESH-----5": "Albania",
+  "10Y1001C--00100H": "Kosovo",
+  "10Y1001C--00096J": "Moldova",
+  "10Y1001C--000182": "Ukraine (IPS)",
+  "10YTR-TEIAS----W": "Turkey"
 };
 
 // 1. SAFE UUID GENERATOR
