@@ -1,5 +1,5 @@
 /**
- * Power by the Hour - ENTSO-E Energy Bridge (v3.24 Paranoid Logging)
+ * Power by the Hour - ENTSO-E Energy Bridge (v3.25 Bulletproof Defaults)
  *
  * API ENDPOINTS:
  * GET /?zone=[EIC_CODE]&key=[AUTH_KEY]     -> Get specific zone prices
@@ -69,36 +69,32 @@ const generateUUID = () => {
   });
 };
 
-// IMPROVED XML EXTRACTOR (Handles Namespaces & Attributes)
+// IMPROVED XML EXTRACTOR (Namespace Robust)
 const getTagValue = (xml, tagName) => {
-  // Matches <TagName>...</TagName> OR <ns:TagName>...</ns:TagName>
-  // Case insensitive, robust against attributes
   const regex = new RegExp(`<([a-zA-Z0-9_\\-]*:)?${tagName}(?:\\s[^>]*)?>([^<]+)<\\/([a-zA-Z0-9_\\-]*:)?${tagName}>`, "i");
   const match = xml.match(regex);
   return match ? match[2].trim() : null;
 };
 
 export default {
-  // 1. STANDARD HTTP REQUEST HANDLER
   async fetch(request, env, ctx) {
     const STORAGE_PREFIX = "prices_";
     const url = new URL(request.url);
 
     if (url.pathname === '/favicon.ico') return new Response(null, { status: 204 });
 
-    // --- POST HANDLING (ENTSO-E PUSH) ---
+    // --- POST HANDLING ---
     if (request.method === "POST") {
       
-      // *** DEBUG: LOG INCOMING REQUEST DETAILS ***
       console.log("\n>>> INCOMING POST REQUEST START <<<");
       console.log("HEADERS:", JSON.stringify(Object.fromEntries(request.headers)));
-      // *******************************************
 
+      // Initialize with FALLBACK values to never return "UNKNOWN"
       let ackData = { 
         mrid: "PING-" + generateUUID(), 
         sender: "10X1001A1001A450", senderRole: "A32", 
         receiver: env.MY_EIC_CODE || "37XPBTH-DUMMY-1", receiverRole: "A39",
-        docId: "UNKNOWN",
+        docId: "FALLBACK-" + Date.now(), 
         docRev: "1" 
       };
 
@@ -107,29 +103,36 @@ export default {
         const contentLength = request.headers.get("content-length");
         const isSoap = contentType.includes("soap") || contentType.includes("xml");
         
-        // --- CASE 1: EMPTY PING (Connection Check) ---
+        // CASE 1: EMPTY PING
         if (!contentLength || contentLength === "0") {
              console.log("ACTION: Empty Body detected -> Returning 200 OK.");
              console.log(">>> REQUEST END <<<\n");
              return new Response(null, { status: 200 });
         }
 
-        // --- CASE 2: REAL DATA ---
+        // CASE 2: REAL DATA
         const xmlData = await request.text();
         
-        // *** DEBUG: LOG RAW XML SAMPLE ***
         console.log("RAW XML BODY (First 1000 chars):");
         console.log(xmlData.substring(0, 1000));
-        // *********************************
 
-        // Extract Data & Log Results
+        // Extract Data (With Fallback Logic)
         const mrid = getTagValue(xmlData, "mRID"); 
-        console.log(`PARSED [mRID]: '${mrid}'`);
-        if (mrid) ackData.docId = mrid;
+        if (mrid) {
+            ackData.docId = mrid;
+            console.log(`PARSED [mRID]: '${mrid}'`);
+        } else {
+            console.warn(`WARNING: Could not parse mRID. Using Fallback: ${ackData.docId}`);
+        }
         
         const rev = getTagValue(xmlData, "revisionNumber"); 
-        console.log(`PARSED [revisionNumber]: '${rev}'`);
-        if (rev) ackData.docRev = rev;
+        if (rev) {
+            ackData.docRev = rev;
+            console.log(`PARSED [revisionNumber]: '${rev}'`);
+        } else {
+            console.log(`PARSED [revisionNumber]: null -> FORCING DEFAULT '1'`);
+            ackData.docRev = "1"; 
+        }
         
         const sender = getTagValue(xmlData, "sender_MarketParticipant.mRID"); if (sender) ackData.receiver = sender;
         const senderRole = getTagValue(xmlData, "sender_MarketParticipant.marketRole.type"); if (senderRole) ackData.receiverRole = senderRole;
@@ -140,11 +143,10 @@ export default {
           ctx.waitUntil(this.processData(xmlData, env, STORAGE_PREFIX));
         }
 
-        // GENERATE ACK XML (Plain)
+        // GENERATE RESPONSE
         let ackXml = this.generateAck(ackData);
         let responseHeaders = { "Content-Type": "application/xml" };
 
-        // IF INPUT WAS SOAP -> WRAP OUTPUT IN SOAP
         if (isSoap && contentType.includes("application/soap+xml")) {
              console.log("ACTION: Wrapping Output in SOAP Envelope.");
              responseHeaders["Content-Type"] = "application/soap+xml";
@@ -159,11 +161,9 @@ export default {
              console.log("ACTION: Sending Plain XML Response.");
         }
 
-        // *** DEBUG: LOG OUTGOING XML ***
         console.log("FINAL OUTPUT XML:");
         console.log(ackXml);
         console.log(">>> REQUEST END <<<\n");
-        // *******************************
 
         return new Response(ackXml, { status: 200, headers: responseHeaders });
 
@@ -174,37 +174,30 @@ export default {
       }
     }
 
-    // --- GET & AUTH HANDLING ---
+    // --- GET & AUTH ---
     const isAuthEnabled = env.AUTH_KEY && env.AUTH_KEY.trim().length > 0;
     if (isAuthEnabled) {
       const key = url.searchParams.get("key") || request.headers.get("X-API-Key");
       if (key !== env.AUTH_KEY.trim()) return new Response("Unauthorized", { status: 401 });
     }
 
-    // A. DELETE logic
     if (url.searchParams.has("delete")) {
         const zoneToDelete = url.searchParams.get("delete");
         await env.PBTH_STORAGE.delete(STORAGE_PREFIX + zoneToDelete);
-        return new Response(JSON.stringify({ message: `Deleted zone ${zoneToDelete}` }), { 
-            status: 200, headers: { "Content-Type": "application/json" } 
-        });
+        return new Response(JSON.stringify({ message: `Deleted zone ${zoneToDelete}` }), { status: 200, headers: { "Content-Type": "application/json" } });
     }
 
-    // B. STATUS logic
     if (url.searchParams.has("status")) {
       const list = await env.PBTH_STORAGE.list({ prefix: STORAGE_PREFIX });
       const lastUpdateRaw = await env.PBTH_STORAGE.get("bridge_last_update") || "N/A";
-      
       let entsoeServiceOnline = false;
       if (lastUpdateRaw !== "N/A") {
           const lastUpdateDate = new Date(lastUpdateRaw);
           const diffMs = new Date() - lastUpdateDate;
           entsoeServiceOnline = Math.floor(diffMs / 60000) <= 60;
       }
-
       const todayTarget = new Date(); todayTarget.setUTCHours(23, 0, 0, 0);
       const tomorrowTarget = new Date(todayTarget); tomorrowTarget.setDate(tomorrowTarget.getDate() + 1);
-
       const zones = list.keys.map(k => {
         let isCompleteToday = false;
         let isCompleteTomorrow = false;
@@ -222,19 +215,17 @@ export default {
           points: k.metadata?.count || 0, res: `${k.metadata?.res || 60}m`, seq: k.metadata?.seq || "1", curr: k.metadata?.currency || "EUR" 
         };
       });
-
       const ratioToday = zones.length > 0 ? (zones.filter(z => z.is_complete_today).length / zones.length) : 0;
       const ratioTomorrow = zones.length > 0 ? (zones.filter(z => z.is_complete_tomorrow).length / zones.length) : 0;
-      
       return new Response(JSON.stringify({ 
-          bridge: "PBTH Energy Bridge Pro (v3.24 Paranoid Log)", 
+          bridge: "PBTH Energy Bridge Pro (v3.25 Bulletproof)", 
           summary: { 
               total_zones: zones.length, 
-              complete_today: Number(ratioToday.toFixed(2)),
-              complete_tomorrow: Number(ratioTomorrow.toFixed(2)),
-              entsoe_service_online: entsoeServiceOnline,
+              complete_today: Number(ratioToday.toFixed(2)), 
+              complete_tomorrow: Number(ratioTomorrow.toFixed(2)), 
+              entsoe_service_online: entsoeServiceOnline, 
               last_push: lastUpdateRaw 
-          },
+          }, 
           zones: zones.sort((a,b) => a.zone.localeCompare(b.zone)) 
       }, null, 2), { headers: { "Content-Type": "application/json" } });
     }
@@ -243,24 +234,16 @@ export default {
     if (zone) {
         const { value, metadata } = await env.PBTH_STORAGE.getWithMetadata(STORAGE_PREFIX + zone);
         if (!value) return new Response(JSON.stringify({ error: "Zone not found" }), { status: 404 });
-        return new Response(JSON.stringify({ 
-            zone, name: metadata?.name || ZONE_NAMES[zone] || "N/A", 
-            updated: metadata?.updated, points: metadata?.count, res: `${metadata?.res}m`, data: JSON.parse(value) 
-        }, null, 2), { headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*", "Cache-Control": "public, max-age=300" } });
+        return new Response(JSON.stringify({ zone, name: metadata?.name || ZONE_NAMES[zone] || "N/A", updated: metadata?.updated, points: metadata?.count, res: `${metadata?.res}m`, data: JSON.parse(value) }, null, 2), { headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*", "Cache-Control": "public, max-age=300" } });
     }
-    
-    return new Response("PBTH Energy Bridge v3.24 Online", { status: 200 });
+    return new Response("PBTH Energy Bridge v3.25 Online", { status: 200 });
   },
 
-  // 2. CRON SCHEDULED HANDLER
   async scheduled(event, env, ctx) {
     const lastUpdateRaw = await env.PBTH_STORAGE.get("bridge_last_update");
     if (!lastUpdateRaw) return;
-
     const lastUpdate = new Date(lastUpdateRaw);
-    const diffMs = new Date() - lastUpdate;
-    const diffMinutes = Math.floor(diffMs / 60000);
-
+    const diffMinutes = Math.floor((new Date() - lastUpdate) / 60000);
     if (diffMinutes > 60 && env.HOMEY_WEBHOOK_URL) {
         console.log(`WATCHDOG ALERT: No data for ${diffMinutes} minutes.`);
         await fetch(env.HOMEY_WEBHOOK_URL, { 
@@ -277,7 +260,6 @@ export default {
     }
   },
 
-  // 3. DATA PROCESSING
   async processData(xmlData, env, STORAGE_PREFIX) {
     try {
         const zoneEic = getTagValue(xmlData, "out_Domain.mRID") || "UNKNOWN";
@@ -332,7 +314,6 @@ export default {
     } catch (e) { console.error("Async error:", e); }
   },
 
-  // FIXED: STRICT COMPLIANCE ACK GENERATOR
   generateAck(data) {
     const time = new Date().toISOString().split('.')[0] + "Z";
     
