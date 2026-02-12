@@ -219,7 +219,7 @@ export default {
       const ratioTomorrow = zones.length > 0 ? (zones.filter(z => z.is_complete_tomorrow).length / zones.length) : 0;
       
       return new Response(JSON.stringify({ 
-          bridge: "PBTH Energy Bridge Pro (v3.20)", 
+          bridge: "PBTH Energy Bridge Pro (v3.21)", 
           summary: { 
               total_zones: zones.length, 
               complete_today: Number(ratioToday.toFixed(2)),
