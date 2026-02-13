@@ -8,13 +8,10 @@ routes = [
 	{ pattern = "entsoe.gruijter.org", custom_domain = true }
 ]
 
-# R2 BINDING (Vervangt de oude KV)
+# R2 BINDING
 [[r2_buckets]]
 binding = "ENTSOE_PRICES_R2_BUCKET"
 bucket_name = "entsoe-prices"
-
-# Let op: De [triggers] (cron) sectie is verwijderd, want de waakhond is uit de code gehaald.
-# Let op: De [[kv_namespaces]] sectie is verwijderd.
 
 [observability]
 enabled = false
