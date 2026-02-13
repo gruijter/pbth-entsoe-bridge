@@ -1,5 +1,5 @@
 /**
- * Power by the Hour - ENTSO-E Energy Bridge (v4.3 R2 Edition - Sorted Status)
+ * Power by the Hour - ENTSO-E Energy Bridge (v4.4 R2 Edition - Smart Diff))
  *
  * API ENDPOINTS:
  * https://entsoe.gruijter.org                          -> POST endpoint for ENTSO-E Webservice
@@ -60,15 +60,13 @@ export default {
       try {
         const xmlData = await request.text();
         
-        // Process Data Asynchronously if it contains an actual payload
         if (xmlData.length > 50) {
           ctx.waitUntil(this.processData(xmlData, env));
         } else {
-          // It's an empty ping from ENTSO-E. Let's build the initial status.json!
+          // Empty ping -> generate status.json
           ctx.waitUntil(this.updateStatusFile(env, new Date().toISOString()));
         }
 
-        // GENERATE STRICT RESPONSE (IEC 62325-504 ResponseMessage)
         const responseXml = `<?xml version="1.0" encoding="UTF-8"?>
 <SOAP-ENV:Envelope xmlns:SOAP-ENV="http://www.w3.org/2003/05/soap-envelope" SOAP-ENV:encodingStyle="http://www.w3.org/2001/12/soap-encoding">
   <SOAP-ENV:Body>
@@ -91,15 +89,12 @@ export default {
       }
     }
 
-    // --- GET HANDLING (Client Requests) ---
+    // --- GET HANDLING ---
     if (request.method === "GET") {
-        // Manual Initialization trigger
         if (url.searchParams.has("init")) {
             await this.updateStatusFile(env, new Date().toISOString());
             return new Response("Initialized! status.json has been created in R2.\n\nYou can view it here: " + PUBLIC_R2_URL + "/status.json", { status: 200 });
         }
-
-        // Redirect all other traffic to the Public R2 CDN domain
         if (url.searchParams.has("status")) {
             return Response.redirect(`${PUBLIC_R2_URL}/status.json`, 301);
         }
@@ -107,7 +102,7 @@ export default {
         if (zone) {
             return Response.redirect(`${PUBLIC_R2_URL}/${zone}.json`, 301);
         }
-        return new Response("PBTH Energy Bridge v4.3 (R2 Edition) Online. Please use the public URL: " + PUBLIC_R2_URL, { status: 200 });
+        return new Response("PBTH Energy Bridge v4.4 (R2 Edition) Online. Please use the public URL: " + PUBLIC_R2_URL, { status: 200 });
     }
 
     return new Response("Method not allowed", { status: 405 });
@@ -144,7 +139,6 @@ export default {
             let existingPrices = [];
             let existingSeq = 0;
 
-            // Read existing file from R2
             const existingObj = await env.ENTSOE_PRICES_R2_BUCKET.get(fileName);
             if (existingObj) {
                 try {
@@ -154,47 +148,55 @@ export default {
                 } catch(e) {}
             }
 
-            // Only update if sequence is newer or equal, or if we have no data
             if (incomingSeq >= existingSeq || existingPrices.length === 0) {
-                // Merge prices
-                const priceMap = new Map(existingPrices.map(obj => [obj.time, obj.price]));
-                newPrices.forEach(item => priceMap.set(item.time, item.price));
                 
-                // Prune old data (keep only last 48 hours)
-                const pruneLimit = new Date(Date.now() - 48 * 3600 * 1000).toISOString();
-                const sortedPrices = Array.from(priceMap, ([time, price]) => ({ time, price }))
-                    .filter(item => item.time >= pruneLimit)
-                    .sort((a, b) => new Date(a.time) - new Date(b.time));
-
-                const now = new Date().toISOString();
-                const latestTime = sortedPrices.length > 0 ? sortedPrices[sortedPrices.length - 1].time : now;
-
-                // 1. WRITE ZONE JSON TO R2
-                const zoneJsonPayload = {
-                    zone: zoneEic,
-                    name: zoneName,
-                    license: LICENSE_TEXT,
-                    updated: now,
-                    points: sortedPrices.length,
-                    res: `${resMin}m`,
-                    data: sortedPrices
-                };
-
-                await env.ENTSOE_PRICES_R2_BUCKET.put(fileName, JSON.stringify(zoneJsonPayload), {
-                    httpMetadata: { contentType: "application/json", cacheControl: "public, max-age=300" },
-                    customMetadata: {
-                        updated: now,
-                        name: zoneName,
-                        count: sortedPrices.length.toString(),
-                        currency,
-                        res: resMin.toString(),
-                        seq: incomingSeq.toString(),
-                        latest: latestTime
+                let dataChanged = false;
+                const priceMap = new Map(existingPrices.map(obj => [obj.time, obj.price]));
+                
+                // Smart Diff: Check if incoming data actually adds or modifies anything
+                newPrices.forEach(item => {
+                    if (!priceMap.has(item.time) || priceMap.get(item.time) !== item.price) {
+                        priceMap.set(item.time, item.price);
+                        dataChanged = true; // We found a meaningful change!
                     }
                 });
 
-                // 2. REBUILD AND WRITE STATUS.JSON TO R2
-                await this.updateStatusFile(env, now);
+                // Only perform R2 write if something changed (or if it's a completely new zone)
+                if (dataChanged || existingPrices.length === 0) {
+                    
+                    const pruneLimit = new Date(Date.now() - 48 * 3600 * 1000).toISOString();
+                    const sortedPrices = Array.from(priceMap, ([time, price]) => ({ time, price }))
+                        .filter(item => item.time >= pruneLimit)
+                        .sort((a, b) => new Date(a.time) - new Date(b.time));
+
+                    const now = new Date().toISOString();
+                    const latestTime = sortedPrices.length > 0 ? sortedPrices[sortedPrices.length - 1].time : now;
+
+                    const zoneJsonPayload = {
+                        zone: zoneEic,
+                        name: zoneName,
+                        license: LICENSE_TEXT,
+                        updated: now,
+                        points: sortedPrices.length,
+                        res: `${resMin}m`,
+                        data: sortedPrices
+                    };
+
+                    await env.ENTSOE_PRICES_R2_BUCKET.put(fileName, JSON.stringify(zoneJsonPayload), {
+                        httpMetadata: { contentType: "application/json", cacheControl: "public, max-age=300" },
+                        customMetadata: {
+                            updated: now,
+                            name: zoneName,
+                            count: sortedPrices.length.toString(),
+                            currency,
+                            res: resMin.toString(),
+                            seq: incomingSeq.toString(),
+                            latest: latestTime
+                        }
+                    });
+
+                    await this.updateStatusFile(env, now);
+                }
             }
         }
     } catch (e) { console.error("Data processing error:", e); }
@@ -236,7 +238,6 @@ export default {
             };
         });
 
-    // Sort descending by 'updated' timestamp
     zones.sort((a, b) => {
         const timeA = a.updated === "N/A" ? 0 : new Date(a.updated).getTime();
         const timeB = b.updated === "N/A" ? 0 : new Date(b.updated).getTime();
@@ -247,7 +248,7 @@ export default {
     const ratioTomorrow = zones.length > 0 ? (zones.filter(z => z.is_complete_tomorrow).length / zones.length) : 0;
 
     const statusPayload = { 
-        bridge: "PBTH Energy Bridge Pro (v4.3 R2 Edition)", 
+        bridge: "PBTH Energy Bridge Pro (v4.4 R2 Edition)", 
         license: LICENSE_TEXT,
         summary: { 
             total_zones: zones.length, 
