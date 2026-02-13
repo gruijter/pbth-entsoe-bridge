@@ -1,5 +1,5 @@
 /**
- * Power by the Hour - ENTSO-E Energy Bridge (v4.1 R2 Edition - No Webhooks)
+ * Power by the Hour - ENTSO-E Energy Bridge (v4.2 R2 Edition - Init & Fix)
  *
  * ARCHITECTURE UPGRADE:
  * - Completely replaced KV storage with Cloudflare R2 (ENTSOE_PRICES_R2_BUCKET).
@@ -63,20 +63,18 @@ export default {
     // --- POST HANDLING (ENTSO-E Data Push) ---
     if (request.method === "POST") {
       try {
-        const contentLength = request.headers.get("content-length");
-        if (!contentLength || contentLength === "0") {
-             return new Response(null, { status: 200 }); // Handled in SOAP generation later to ensure connection check passes
-        }
-
         const xmlData = await request.text();
         
-        // Process Data Asynchronously if it contains actual payload
+        // Process Data Asynchronously if it contains an actual payload
         if (xmlData.length > 50) {
           ctx.waitUntil(this.processData(xmlData, env));
+        } else {
+          // It's an empty ping from ENTSO-E. Let's build the initial status.json!
+          ctx.waitUntil(this.updateStatusFile(env, new Date().toISOString()));
         }
 
         // GENERATE STRICT RESPONSE (IEC 62325-504 ResponseMessage)
-        // This confirms receipt to ENTSO-E in the exact format they require.
+        // This confirms receipt to ENTSO-E in the exact format they require, even for empty pings.
         const responseXml = `<?xml version="1.0" encoding="UTF-8"?>
 <SOAP-ENV:Envelope xmlns:SOAP-ENV="http://www.w3.org/2003/05/soap-envelope" SOAP-ENV:encodingStyle="http://www.w3.org/2001/12/soap-encoding">
   <SOAP-ENV:Body>
@@ -100,8 +98,14 @@ export default {
     }
 
     // --- GET HANDLING (Client Requests) ---
-    // Redirect all traffic to the Public R2 CDN domain to save Worker invocations.
     if (request.method === "GET") {
+        // Manual Initialization trigger
+        if (url.searchParams.has("init")) {
+            await this.updateStatusFile(env, new Date().toISOString());
+            return new Response("Initialized! status.json has been created in R2.\n\nYou can view it here: " + PUBLIC_R2_URL + "/status.json", { status: 200 });
+        }
+
+        // Redirect all other traffic to the Public R2 CDN domain
         if (url.searchParams.has("status")) {
             return Response.redirect(`${PUBLIC_R2_URL}/status.json`, 301);
         }
@@ -109,7 +113,7 @@ export default {
         if (zone) {
             return Response.redirect(`${PUBLIC_R2_URL}/${zone}.json`, 301);
         }
-        return new Response("PBTH Energy Bridge v4.1 (R2 Edition) Online. Please use the public URL: " + PUBLIC_R2_URL, { status: 200 });
+        return new Response("PBTH Energy Bridge v4.2 (R2 Edition) Online. Please use the public URL: " + PUBLIC_R2_URL, { status: 200 });
     }
 
     return new Response("Method not allowed", { status: 405 });
@@ -148,114 +152,3 @@ export default {
 
             // Read existing file from R2
             const existingObj = await env.ENTSOE_PRICES_R2_BUCKET.get(fileName);
-            if (existingObj) {
-                try {
-                    const existingData = await existingObj.json();
-                    existingPrices = existingData.data || [];
-                    existingSeq = parseInt(existingObj.customMetadata?.seq || "0");
-                } catch(e) {}
-            }
-
-            // Only update if sequence is newer or equal, or if we have no data
-            if (incomingSeq >= existingSeq || existingPrices.length === 0) {
-                // Merge prices
-                const priceMap = new Map(existingPrices.map(obj => [obj.time, obj.price]));
-                newPrices.forEach(item => priceMap.set(item.time, item.price));
-                
-                // Prune old data (keep only last 48 hours)
-                const pruneLimit = new Date(Date.now() - 48 * 3600 * 1000).toISOString();
-                const sortedPrices = Array.from(priceMap, ([time, price]) => ({ time, price }))
-                    .filter(item => item.time >= pruneLimit)
-                    .sort((a, b) => new Date(a.time) - new Date(b.time));
-
-                const now = new Date().toISOString();
-                const latestTime = sortedPrices.length > 0 ? sortedPrices[sortedPrices.length - 1].time : now;
-
-                // 1. WRITE ZONE JSON TO R2
-                const zoneJsonPayload = {
-                    zone: zoneEic,
-                    name: zoneName,
-                    license: LICENSE_TEXT,
-                    updated: now,
-                    points: sortedPrices.length,
-                    res: `${resMin}m`,
-                    data: sortedPrices
-                };
-
-                await env.ENTSOE_PRICES_R2_BUCKET.put(fileName, JSON.stringify(zoneJsonPayload), {
-                    httpMetadata: { contentType: "application/json", cacheControl: "public, max-age=300" },
-                    customMetadata: {
-                        updated: now,
-                        name: zoneName,
-                        count: sortedPrices.length.toString(),
-                        currency,
-                        res: resMin.toString(),
-                        seq: incomingSeq.toString(),
-                        latest: latestTime
-                    }
-                });
-
-                // 2. REBUILD AND WRITE STATUS.JSON TO R2
-                await this.updateStatusFile(env, now);
-            }
-        }
-    } catch (e) { console.error("Data processing error:", e); }
-  },
-
-  async updateStatusFile(env, lastPushTime) {
-    const todayTarget = new Date(); todayTarget.setUTCHours(23, 0, 0, 0);
-    const tomorrowTarget = new Date(todayTarget); tomorrowTarget.setDate(tomorrowTarget.getDate() + 1);
-
-    const listed = await env.ENTSOE_PRICES_R2_BUCKET.list({ include: ['customMetadata'] });
-    
-    const zones = listed.objects
-        .filter(k => k.key !== 'status.json' && k.key.endsWith('.json'))
-        .map(k => {
-            const meta = k.customMetadata || {};
-            let isCompleteToday = false;
-            let isCompleteTomorrow = false;
-            
-            if (meta.latest) {
-                const latestDate = new Date(meta.latest);
-                const resMinutes = parseInt(meta.res || "60");
-                const endTime = new Date(latestDate.getTime() + resMinutes * 60000);
-                isCompleteToday = endTime >= todayTarget;
-                isCompleteTomorrow = endTime >= tomorrowTarget;
-            }
-            
-            const eic = k.key.replace('.json', '');
-            return { 
-                zone: eic, 
-                name: meta.name || ZONE_NAMES[eic] || "N/A", 
-                updated: meta.updated || "N/A", 
-                latest_data: meta.latest || "N/A", 
-                is_complete_today: isCompleteToday, 
-                is_complete_tomorrow: isCompleteTomorrow, 
-                points: parseInt(meta.count || "0"), 
-                res: `${meta.res || "60"}m`, 
-                seq: meta.seq || "1", 
-                curr: meta.currency || "EUR" 
-            };
-        });
-
-    const ratioToday = zones.length > 0 ? (zones.filter(z => z.is_complete_today).length / zones.length) : 0;
-    const ratioTomorrow = zones.length > 0 ? (zones.filter(z => z.is_complete_tomorrow).length / zones.length) : 0;
-
-    const statusPayload = { 
-        bridge: "PBTH Energy Bridge Pro (v4.1 R2 Edition)", 
-        license: LICENSE_TEXT,
-        summary: { 
-            total_zones: zones.length, 
-            complete_today: Number(ratioToday.toFixed(2)), 
-            complete_tomorrow: Number(ratioTomorrow.toFixed(2)), 
-            entsoe_service_online: true, 
-            last_push: lastPushTime 
-        }, 
-        zones: zones.sort((a,b) => a.zone.localeCompare(b.zone)) 
-    };
-
-    await env.ENTSOE_PRICES_R2_BUCKET.put('status.json', JSON.stringify(statusPayload), {
-        httpMetadata: { contentType: "application/json", cacheControl: "public, max-age=60" }
-    });
-  }
-};
