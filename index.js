@@ -1,14 +1,9 @@
 /**
- * Power by the Hour - ENTSO-E Energy Bridge (v4.2 R2 Edition - Init & Fix)
+ * Power by the Hour - ENTSO-E Energy Bridge (v4.3 R2 Edition - Sorted Status)
  *
- * ARCHITECTURE UPGRADE:
- * - Completely replaced KV storage with Cloudflare R2 (ENTSOE_PRICES_R2_BUCKET).
- * - Generates static JSON files (e.g., 10YNL----------L.json and status.json) to minimize Worker invocations.
- * - HTTP GET requests to the Worker are automatically REDIRECTED to the public R2 domain.
- * - Injects CC BY 4.0 License & Copyright into all generated JSON payloads.
- * - Strict SOAP compliance for ENTSO-E push interface maintained (IEC 62325-504 ResponseMessage).
- *
- * API ENDPOINTS (Now static files via R2):
+ * API ENDPOINTS:
+ * https://entsoe.gruijter.org                          -> POST endpoint for ENTSO-E Webservice
+ * https://entsoe.gruijter.org/?init=true               -> Manually force the generation of the status.json file in R2
  * https://entsoe-prices.gruijter.org/status.json       -> Get bridge health & available zones
  * https://entsoe-prices.gruijter.org/[EIC_CODE].json   -> Get specific zone prices
  */
@@ -74,7 +69,6 @@ export default {
         }
 
         // GENERATE STRICT RESPONSE (IEC 62325-504 ResponseMessage)
-        // This confirms receipt to ENTSO-E in the exact format they require, even for empty pings.
         const responseXml = `<?xml version="1.0" encoding="UTF-8"?>
 <SOAP-ENV:Envelope xmlns:SOAP-ENV="http://www.w3.org/2003/05/soap-envelope" SOAP-ENV:encodingStyle="http://www.w3.org/2001/12/soap-encoding">
   <SOAP-ENV:Body>
@@ -113,7 +107,7 @@ export default {
         if (zone) {
             return Response.redirect(`${PUBLIC_R2_URL}/${zone}.json`, 301);
         }
-        return new Response("PBTH Energy Bridge v4.2 (R2 Edition) Online. Please use the public URL: " + PUBLIC_R2_URL, { status: 200 });
+        return new Response("PBTH Energy Bridge v4.3 (R2 Edition) Online. Please use the public URL: " + PUBLIC_R2_URL, { status: 200 });
     }
 
     return new Response("Method not allowed", { status: 405 });
@@ -212,7 +206,7 @@ export default {
 
     const listed = await env.ENTSOE_PRICES_R2_BUCKET.list({ include: ['customMetadata'] });
     
-    const zones = listed.objects
+    let zones = listed.objects
         .filter(k => k.key !== 'status.json' && k.key.endsWith('.json'))
         .map(k => {
             const meta = k.customMetadata || {};
@@ -242,11 +236,18 @@ export default {
             };
         });
 
+    // Sort descending by 'updated' timestamp
+    zones.sort((a, b) => {
+        const timeA = a.updated === "N/A" ? 0 : new Date(a.updated).getTime();
+        const timeB = b.updated === "N/A" ? 0 : new Date(b.updated).getTime();
+        return timeB - timeA;
+    });
+
     const ratioToday = zones.length > 0 ? (zones.filter(z => z.is_complete_today).length / zones.length) : 0;
     const ratioTomorrow = zones.length > 0 ? (zones.filter(z => z.is_complete_tomorrow).length / zones.length) : 0;
 
     const statusPayload = { 
-        bridge: "PBTH Energy Bridge Pro (v4.2 R2 Edition)", 
+        bridge: "PBTH Energy Bridge Pro (v4.3 R2 Edition)", 
         license: LICENSE_TEXT,
         summary: { 
             total_zones: zones.length, 
@@ -255,7 +256,7 @@ export default {
             entsoe_service_online: true, 
             last_push: lastPushTime 
         }, 
-        zones: zones.sort((a,b) => a.zone.localeCompare(b.zone)) 
+        zones: zones 
     };
 
     await env.ENTSOE_PRICES_R2_BUCKET.put('status.json', JSON.stringify(statusPayload), {
