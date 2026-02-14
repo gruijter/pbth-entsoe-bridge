@@ -1,5 +1,11 @@
+/* This Source Code Form is subject to the terms of the Mozilla Public
+	License, v. 2.0. If a copy of the MPL was not distributed with this
+	file, You can obtain one at http://mozilla.org/MPL/2.0/.
+
+	Copyright 2026, Robin de Gruijter <gruijter@hotmail.com> */
+
 /**
- * Power by the Hour - ENTSO-E Energy Bridge (v4.4 R2 Edition - Smart Diff))
+ * Power by the Hour - ENTSO-E Energy Bridge (v4.5 R2 Edition - Bulletproof)
  *
  * API ENDPOINTS:
  * https://entsoe.gruijter.org                          -> POST endpoint for ENTSO-E Webservice
@@ -60,13 +66,15 @@ export default {
       try {
         const xmlData = await request.text();
         
+        // If it's a real payload, process it asynchronously
         if (xmlData.length > 50) {
           ctx.waitUntil(this.processData(xmlData, env));
         } else {
-          // Empty ping -> generate status.json
+          // Empty ping from ENTSO-E -> generate/update status.json without breaking
           ctx.waitUntil(this.updateStatusFile(env, new Date().toISOString()));
         }
 
+        // GENERATE STRICT RESPONSE (IEC 62325-504 ResponseMessage)
         const responseXml = `<?xml version="1.0" encoding="UTF-8"?>
 <SOAP-ENV:Envelope xmlns:SOAP-ENV="http://www.w3.org/2003/05/soap-envelope" SOAP-ENV:encodingStyle="http://www.w3.org/2001/12/soap-encoding">
   <SOAP-ENV:Body>
@@ -89,7 +97,7 @@ export default {
       }
     }
 
-    // --- GET HANDLING ---
+    // --- GET HANDLING (Client Requests) ---
     if (request.method === "GET") {
         if (url.searchParams.has("init")) {
             await this.updateStatusFile(env, new Date().toISOString());
@@ -102,7 +110,7 @@ export default {
         if (zone) {
             return Response.redirect(`${PUBLIC_R2_URL}/${zone}.json`, 301);
         }
-        return new Response("PBTH Energy Bridge v4.4 (R2 Edition) Online. Please use the public URL: " + PUBLIC_R2_URL, { status: 200 });
+        return new Response("PBTH Energy Bridge v4.5 (R2 Edition) Online. Please use the public URL: " + PUBLIC_R2_URL, { status: 200 });
     }
 
     return new Response("Method not allowed", { status: 405 });
@@ -128,9 +136,15 @@ export default {
         
         const pointRegex = /<[^>]*Point>[\s\S]*?<[^>]*position>(\d+)<\/[^>]*position>[\s\S]*?<[^>]*price\.amount>([\d.]+)<\/[^>]*price\.amount>[\s\S]*?<\/[^>]*Point>/g;
         let match;
+        
         while ((match = pointRegex.exec(xmlData)) !== null) {
             const timestamp = new Date(startTime.getTime() + (parseInt(match[1]) - 1) * resMin * 60000);
-            newPrices.push({ time: timestamp.toISOString(), price: parseFloat(match[2]) });
+            const parsedPrice = parseFloat(match[2]);
+            
+            // BULLETPROOF CHECK: Only accept valid timestamps and valid numbers
+            if (!isNaN(timestamp.getTime()) && !isNaN(parsedPrice)) {
+                newPrices.push({ time: timestamp.toISOString(), price: parsedPrice });
+            }
         }
 
         if (newPrices.length > 0) {
@@ -154,14 +168,15 @@ export default {
                 const priceMap = new Map(existingPrices.map(obj => [obj.time, obj.price]));
                 
                 // Smart Diff: Check if incoming data actually adds or modifies anything
+                // Existing future data is perfectly preserved in the Map if omitted by the TSO push.
                 newPrices.forEach(item => {
                     if (!priceMap.has(item.time) || priceMap.get(item.time) !== item.price) {
                         priceMap.set(item.time, item.price);
-                        dataChanged = true; // We found a meaningful change!
+                        dataChanged = true;
                     }
                 });
 
-                // Only perform R2 write if something changed (or if it's a completely new zone)
+                // Write to R2 only if meaningful changes were found or it's a completely new file
                 if (dataChanged || existingPrices.length === 0) {
                     
                     const pruneLimit = new Date(Date.now() - 48 * 3600 * 1000).toISOString();
@@ -238,6 +253,7 @@ export default {
             };
         });
 
+    // Sort descending by 'updated' timestamp (Newest files on top)
     zones.sort((a, b) => {
         const timeA = a.updated === "N/A" ? 0 : new Date(a.updated).getTime();
         const timeB = b.updated === "N/A" ? 0 : new Date(b.updated).getTime();
@@ -248,7 +264,7 @@ export default {
     const ratioTomorrow = zones.length > 0 ? (zones.filter(z => z.is_complete_tomorrow).length / zones.length) : 0;
 
     const statusPayload = { 
-        bridge: "PBTH Energy Bridge Pro (v4.4 R2 Edition)", 
+        bridge: "PBTH Energy Bridge Pro (v4.5 R2 Edition)", 
         license: LICENSE_TEXT,
         summary: { 
             total_zones: zones.length, 
