@@ -5,7 +5,7 @@ This repository contains the highly optimized Cloudflare Worker implementation f
 
 It acts as a lightning-fast, highly scalable middleman between the **ENTSO-E Transparency Platform (Subscription Push Service)** and a fleet of 16,000+ Homey smart home controllers.
 
-## 🚀 Architecture: "God Mode" (v4.5 R2 Edition)
+## 🚀 Architecture
 The bridge is designed to handle millions of daily requests for free, bypassing traditional database and Serverless execution limits:
 - **Cloudflare R2 Storage:** KV storage has been completely removed. Static JSON files are generated upon receiving an XML push from ENTSO-E.
 - **CDN Edge Caching:** Homey apps download the .json files directly from the Cloudflare CDN, saving 100% of Worker execution limits for actual ENTSO-E pushes.
@@ -52,5 +52,5 @@ To generate the very first status.json before ENTSO-E pushes its first payload, 
 
 ## ⚖️ License & Attribution
 
-- **Code License (MPL 2.0):** The source code in this repository is licensed under the Mozilla Public License 2.0 (MPL 2.0). Copyright 2026 gruijter.org.
+- **Code License (MPL 2.0):** The source code in this repository is licensed under the Mozilla Public License 2.0 (MPL 2.0). Copyright 2026, Gruijter.org / Robin de Gruijter <gruijter@hotmail.com>
 - **Data License (CC BY 4.0):** The energy prices distributed by this API are provided by the ENTSO-E Transparency Platform. The data is modified (converted from XML to JSON, pruned, and merged) and distributed under the Creative Commons Attribution 4.0 International License (CC BY 4.0). A legal attribution statement is automatically injected into every generated JSON response.
