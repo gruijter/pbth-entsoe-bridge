@@ -1,93 +1,63 @@
-# pbth-entsoe-bridge
+Power by the Hour - ENTSO-E Energy Bridge
+Overview
+This repository contains the highly optimized Cloudflare Worker implementation for the "Power by the Hour" ENTSO-E Energy Bridge (v4.5 R2 Edition).
 
-⚡ PBTH ENTSO-E Energy Bridge (v1.7)
-A robust, secure, and high-performance proxy built on Cloudflare Workers to deliver Day-Ahead energy prices from ENTSO-E to Homey and the Power by the Hour community.
+It acts as a lightning-fast, highly scalable middleman between the ENTSO-E Transparency Platform (Subscription Push Service) and a fleet of 16,000+ Homey smart home controllers.
 
-🚀 Key Features
-48h Rolling Window: Automatically prunes old price data while ensuring "today's" data is fully available for all European time zones.
+🚀 Architecture: "God Mode" (v4.5 R2 Edition)
+The bridge is designed to handle millions of daily requests for free, bypassing traditional database and Serverless execution limits:
 
-Sequence Prioritization: Always prioritizes the official SDAC auction (Sequence 1) over secondary auctions (such as EXAA) to prevent price inaccuracy.
+Cloudflare R2 Storage: KV storage has been completely removed. Static JSON files are generated upon receiving an XML push from ENTSO-E.
 
-Zone Names: Automatically extracts human-readable names (e.g., "Netherlands", "DK1") directly from ENTSO-E metadata.
+CDN Edge Caching: Homey apps download the .json files directly from the Cloudflare CDN, saving 100% of Worker execution limits for actual ENTSO-E pushes.
 
-Full-Payload Webhooks: Immediately pushes the entire dataset to Homey upon every update, eliminating the need for polling.
+Smart Diff Checker: The Worker checks incoming XML against existing R2 data. It only writes to R2 if the prices actually changed, drastically saving on PUT operations.
 
-Multi-Currency & Unit Support: Fully supports EUR, PLN, and other currencies, including explicit unit reporting (MWh).
+Bulletproof Parser: Automatically ignores corrupt <price.amount> tags (NaN) or missing timestamps pushed by local TSOs. Future data is safely preserved during partial historical updates.
 
-Edge Caching: Built-in 300-second caching to minimize Cloudflare KV reads and maximize response speed.
+Strict SOAP Compliance: Automatically parses and returns the mandatory IEC 62325-504 ResponseMessage to keep ENTSO-E servers happy.
 
-🛠 Installation & Setup
-1. Cloudflare Preparation
-Create a KV Namespace named PBTH_STORAGE.
+📡 API Endpoints (For the Homey App)
+All requests from the Homey app should be standard HTTP GET requests directed at the public R2 domain.
 
-Note the Namespace ID for your configuration.
+Check Data Availability: GET https://entsoe-prices.gruijter.org/status.json
+Returns an index of all supported zones, their last update timestamp, and a crucial is_complete_tomorrow boolean. Use this for "Smart Polling".
 
-2. GitHub Configuration
-Ensure the following two files are in the root directory of your repository:
+Fetch Zone Prices: GET https://entsoe-prices.gruijter.org/[EIC_CODE].json
+Example: .../10YNL----------L.json returns the pruned 48-hour price array for the Netherlands.
 
-wrangler.toml
-Ini, TOML
-name = "pbth-entsoe-bridge"
-main = "index.js"
-compatibility_date = "2026-01-27"
+Legacy Endpoints: Any legacy requests hitting the Worker directly (e.g., /?status or /?zone=...) will automatically return a 301 Redirect to the static R2 URL to force clients onto the CDN.
 
-[[kv_namespaces]]
-binding = "PBTH_STORAGE"
-id = "YOUR_KV_NAMESPACE_ID"
-index.js
-(Paste the complete JavaScript code v1.7 of the bridge here).
+🛠 Deployment & Configuration
+1. Cloudflare R2 Setup
+Create a new R2 bucket in your Cloudflare dashboard named entsoe-prices.
 
-3. Environment Variables (Secrets)
-Configure these in the Cloudflare Dashboard (Settings > Variables):
+Go to the bucket settings and connect your custom domain (e.g., entsoe-prices.gruijter.org).
 
-MY_EIC_CODE: Your ACK identification for ENTSO-E.
+2. Edge Caching Setup
+To allow Cloudflare to cache the dynamic JSON files and serve millions of requests for free:
 
-AUTH_KEY: Your secret key for API access.
+Go to your domain settings in Cloudflare -> Caching -> Cache Rules.
 
-HOMEY_WEBHOOK_URL: (Optional) The URL where the bridge will 'push' data.
+Create a rule matching: Hostname equals entsoe-prices.gruijter.org.
 
-📖 API Documentation (GET Requests)
-Authentication
-Append your key to every request:
+Set Cache Eligibility to Eligible for cache.
 
-URL Parameter: ?zone=...&key=YOUR_KEY
+Set Edge TTL to Respect origin header. (The Worker automatically sends a 5-minute cache header for prices, and a 1-minute header for the status file).
 
-HTTP Header: X-API-Key: YOUR_KEY
+3. Deploy the Worker
+Deploy the index.js and wrangler.toml using Wrangler:
 
-Fetching Prices
-Endpoint: GET /?zone=[EIC_CODE]
+npx wrangler deploy
 
-Example Response:
+Note: Make sure your wrangler.toml contains the R2 binding ENTSOE_PRICES_R2_BUCKET pointing to your bucket.
 
-JSON
-{
-  "zone": "10YNL----------L",
-  "name": "Netherlands",
-  "updated": "2026-01-27T13:29:07.686Z",
-  "points": 95,
-  "res": "15m",
-  "seq": "1",
-  "curr": "EUR",
-  "unit": "MWh",
-  "data": [
-    { "time": "2026-01-27T23:00:00.000Z", "price": 84.52 }
-  ]
-}
-Monitoring & Health
-Endpoint: GET /?status=true
+4. Initialization
+To generate the very first status.json before ENTSO-E pushes its first payload, open your browser and navigate to the Worker url:
 
-The status endpoint provides a health_score to monitor data reliability:
+GET https://entsoe.gruijter.org/?init=true
 
-Health Score: Percentage of zones that have received a full dataset for the current day (up to 23:00 UTC).
+⚖️ License & Attribution
+Code License (MPL 2.0): The source code in this repository is licensed under the Mozilla Public License 2.0 (MPL 2.0). Copyright 2026 gruijter.org.
 
-Zone Name: Displays the descriptive name provided by ENTSO-E (e.g., "DK1-NO1" or "Poland").
-
-Latest Data: Timestamp of the very last price point available in the buffer.
-
-Is Complete Today: Boolean flag indicating if the zone's data covers the entire current day.
-
-🔔 Webhook Integration
-When a new price update is received from ENTSO-E, the bridge sends a POST request to the configured HOMEY_WEBHOOK_URL. The payload includes the zone EIC, human-readable name, and the full price array. This allows for real-time price processing in Homey with zero delay.
-
-⚖️ License & Usage
-This project is designed for use with the Power by the Hour app for Homey. Use is at your own risk. Ensure you have a valid subscription to the ENTSO-E Transparency Platform push service (Item 12.1.D).
+Data License (CC BY 4.0): The energy prices distributed by this API are provided by the ENTSO-E Transparency Platform. The data is modified (converted from XML to JSON, pruned, and merged) and distributed under the Creative Commons Attribution 4.0 International License (CC BY 4.0). A legal attribution statement is automatically injected into every generated JSON response.
