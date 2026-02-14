@@ -2,7 +2,7 @@
 	License, v. 2.0. If a copy of the MPL was not distributed with this
 	file, You can obtain one at http://mozilla.org/MPL/2.0/.
 
-	Copyright 2026, Robin de Gruijter <gruijter@hotmail.com> */
+	Copyright 2026, Gruijter.org / Robin de Gruijter <gruijter@hotmail.com> */
 
 /**
  * Power by the Hour - ENTSO-E Energy Bridge (v4.5 R2 Edition - Bulletproof)
