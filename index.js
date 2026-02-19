@@ -265,7 +265,7 @@ export default {
     const ratioTomorrow = zones.length > 0 ? (zones.filter(z => z.is_complete_tomorrow).length / zones.length) : 0;
 
     const statusPayload = { 
-        bridge: "PBTH Energy Bridge Pro (v4.5 R2 Edition)", 
+        bridge: "PBTH Energy Bridge Pro (v4.6 R2 Edition)", 
         license: LICENSE_TEXT,
         summary: { 
             total_zones: zones.length, 
