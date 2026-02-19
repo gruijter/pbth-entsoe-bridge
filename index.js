@@ -5,7 +5,7 @@
 	Copyright 2026, Gruijter.org / Robin de Gruijter <gruijter@hotmail.com> */
 
 /**
- * Power by the Hour - ENTSO-E Energy Bridge (v4.5 R2 Edition - Bulletproof)
+ * Power by the Hour - ENTSO-E Energy Bridge (v4.6 R2 Edition - Sequenceproof)
  *
  * API ENDPOINTS:
  * https://entsoe.gruijter.org                          -> POST endpoint for ENTSO-E Webservice
@@ -122,7 +122,8 @@ export default {
         const zoneEic = getTagValue(xmlData, "out_Domain.mRID");
         if (!zoneEic) return;
 
-        const sequenceRaw = getTagValue(xmlData, "order_Detail.nRID") || "1";
+        const sequenceRaw = getTagValue(xmlData, "revisionNumber") || "1";
+
         const zoneNameRaw = getTagValue(xmlData, "out_Domain.name");
         const zoneName = ZONE_NAMES[zoneEic] || zoneNameRaw || zoneEic;
         const currency = getTagValue(xmlData, "currency_Unit.name") || "EUR";
