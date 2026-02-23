@@ -5,7 +5,7 @@
 	Copyright 2026, Gruijter.org / Robin de Gruijter <gruijter@hotmail.com> */
 
 /**
- * Power by the Hour - ENTSO-E Energy Bridge (v4.7 R2 Edition - Negative prices)
+ * Power by the Hour - ENTSO-E Energy Bridge (v5.0 R2 Edition - Clean Rewrite)
  *
  * API ENDPOINTS:
  * https://entsoe.gruijter.org                          -> POST endpoint for ENTSO-E Webservice
@@ -66,15 +66,12 @@ export default {
       try {
         const xmlData = await request.text();
         
-        // If it's a real payload, process it asynchronously
         if (xmlData.length > 50) {
           ctx.waitUntil(this.processData(xmlData, env));
         } else {
-          // Empty ping from ENTSO-E -> generate/update status.json without breaking
           ctx.waitUntil(this.updateStatusFile(env, new Date().toISOString()));
         }
 
-        // GENERATE STRICT RESPONSE (IEC 62325-504 ResponseMessage)
         const responseXml = `<?xml version="1.0" encoding="UTF-8"?>
 <SOAP-ENV:Envelope xmlns:SOAP-ENV="http://www.w3.org/2003/05/soap-envelope" SOAP-ENV:encodingStyle="http://www.w3.org/2001/12/soap-encoding">
   <SOAP-ENV:Body>
@@ -101,7 +98,7 @@ export default {
     if (request.method === "GET") {
         if (url.searchParams.has("init")) {
             await this.updateStatusFile(env, new Date().toISOString());
-            return new Response("Initialized! status.json has been created in R2.\n\nYou can view it here: " + PUBLIC_R2_URL + "/status.json", { status: 200 });
+            return new Response("Initialized! status.json has been created in R2.", { status: 200 });
         }
         if (url.searchParams.has("status")) {
             return Response.redirect(`${PUBLIC_R2_URL}/status.json`, 301);
@@ -110,7 +107,7 @@ export default {
         if (zone) {
             return Response.redirect(`${PUBLIC_R2_URL}/${zone}.json`, 301);
         }
-        return new Response("PBTH Energy Bridge v4.7 (R2 Edition) Online. Please use the public URL: " + PUBLIC_R2_URL, { status: 200 });
+        return new Response("PBTH Energy Bridge v5.0 (R2 Edition) Online. Please use the public URL: " + PUBLIC_R2_URL, { status: 200 });
     }
 
     return new Response("Method not allowed", { status: 405 });
@@ -122,104 +119,113 @@ export default {
         const zoneEic = getTagValue(xmlData, "out_Domain.mRID");
         if (!zoneEic) return;
 
-        const sequenceRaw = getTagValue(xmlData, "revisionNumber") || "1";
-
         const zoneNameRaw = getTagValue(xmlData, "out_Domain.name");
         const zoneName = ZONE_NAMES[zoneEic] || zoneNameRaw || zoneEic;
         const currency = getTagValue(xmlData, "currency_Unit.name") || "EUR";
-        const resolutionRaw = getTagValue(xmlData, "resolution") || "PT60M";
-        const startRaw = getTagValue(xmlData, "start");
-        if (!startRaw) return;
-
-        const startTime = new Date(startRaw);
-        const resMin = resolutionRaw.includes("PT15M") ? 15 : 60;
         const newPrices = [];
+        let finalResMin = 60; // Fallback
         
-        const pointRegex = /<[^>]*Point>[\s\S]*?<[^>]*position>(\d+)<\/[^>]*position>[\s\S]*?<[^>]*price\.amount>([-\d.]+)<\/[^>]*price\.amount>[\s\S]*?<\/[^>]*Point>/g;
-        let match;
+        // V5 BUGFIX 1: Strictly iterate over individual <Period> blocks to prevent timestamps overwriting
+        // each other when ENTSO-E pushes multiple days in a single document.
+        const periodRegex = /<[^>]*Period(?:\s[^>]*)?>([\s\S]*?)<\/[^>]*Period>/ig;
+        let periodMatch;
         
-        while ((match = pointRegex.exec(xmlData)) !== null) {
-            const timestamp = new Date(startTime.getTime() + (parseInt(match[1]) - 1) * resMin * 60000);
-            const parsedPrice = parseFloat(match[2]);
+        while ((periodMatch = periodRegex.exec(xmlData)) !== null) {
+            const periodXml = periodMatch[1];
             
-            // BULLETPROOF CHECK: Only accept valid timestamps and valid numbers
-            if (!isNaN(timestamp.getTime()) && !isNaN(parsedPrice)) {
-                newPrices.push({ time: timestamp.toISOString(), price: parsedPrice });
+            // Extract the dedicated start time and resolution for THIS specific block
+            const startRaw = getTagValue(periodXml, "start");
+            const resolutionRaw = getTagValue(periodXml, "resolution") || "PT60M";
+            if (!startRaw) continue; 
+            
+            const startTime = new Date(startRaw);
+            const resMin = resolutionRaw.includes("PT15M") ? 15 : 60;
+            finalResMin = resMin; // Update final known resolution for metadata
+            
+            // Extract points, strictly including negative values [-]
+            const pointRegex = /<[^>]*Point(?:[\s\S]*?)?>[\s\S]*?<[^>]*position(?:[\s\S]*?)?>(\d+)<\/[^>]*position>[\s\S]*?<[^>]*price\.amount(?:[\s\S]*?)?>([-\d.]+)<\/[^>]*price\.amount>[\s\S]*?<\/[^>]*Point>/ig;
+            let pointMatch;
+            
+            while ((pointMatch = pointRegex.exec(periodXml)) !== null) {
+                const timestamp = new Date(startTime.getTime() + (parseInt(pointMatch[1]) - 1) * resMin * 60000);
+                const parsedPrice = parseFloat(pointMatch[2]);
+                
+                if (!isNaN(timestamp.getTime()) && !isNaN(parsedPrice)) {
+                    newPrices.push({ time: timestamp.toISOString(), price: parsedPrice });
+                }
             }
         }
 
         if (newPrices.length > 0) {
             const fileName = `${zoneEic}.json`;
-            const incomingSeq = parseInt(sequenceRaw);
             let existingPrices = [];
-            let existingSeq = 0;
 
+            // Fetch existing data
             const existingObj = await env.ENTSOE_PRICES_R2_BUCKET.get(fileName);
             if (existingObj) {
                 try {
                     const existingData = await existingObj.json();
                     existingPrices = existingData.data || [];
-                    existingSeq = parseInt(existingObj.customMetadata?.seq || "0");
                 } catch(e) {}
             }
+            
+            let dataChanged = false;
+            const priceMap = new Map(existingPrices.map(obj => [obj.time, obj.price]));
+            
+            // V5 BUGFIX 2: Smart Diff overrides the 'seq/revisionNumber' lockout entirely.
+            // Only data that is actually NEW or has a DIFFERENT PRICE is recorded. 
+            // This autonomously fixes the ENTSO-E revision number paradox.
+            newPrices.forEach(item => {
+                if (!priceMap.has(item.time) || priceMap.get(item.time) !== item.price) {
+                    priceMap.set(item.time, item.price);
+                    dataChanged = true;
+                }
+            });
 
-            if (incomingSeq >= existingSeq || existingPrices.length === 0) {
+            // Write to R2 only if meaningful changes were found or it's a completely new file
+            if (dataChanged || existingPrices.length === 0) {
                 
-                let dataChanged = false;
-                const priceMap = new Map(existingPrices.map(obj => [obj.time, obj.price]));
-                
-                // Smart Diff: Check if incoming data actually adds or modifies anything
-                // Existing future data is perfectly preserved in the Map if omitted by the TSO push.
-                newPrices.forEach(item => {
-                    if (!priceMap.has(item.time) || priceMap.get(item.time) !== item.price) {
-                        priceMap.set(item.time, item.price);
-                        dataChanged = true;
+                // Prune old data (keep only last 48 hours)
+                const pruneLimit = new Date(Date.now() - 48 * 3600 * 1000).toISOString();
+                const sortedPrices = Array.from(priceMap, ([time, price]) => ({ time, price }))
+                    .filter(item => item.time >= pruneLimit)
+                    .sort((a, b) => new Date(a.time) - new Date(b.time));
+
+                const now = new Date().toISOString();
+                const latestTime = sortedPrices.length > 0 ? sortedPrices[sortedPrices.length - 1].time : now;
+
+                const zoneJsonPayload = {
+                    zone: zoneEic,
+                    name: zoneName,
+                    license: LICENSE_TEXT,
+                    updated: now,
+                    points: sortedPrices.length,
+                    res: `${finalResMin}m`,
+                    data: sortedPrices
+                };
+
+                await env.ENTSOE_PRICES_R2_BUCKET.put(fileName, JSON.stringify(zoneJsonPayload), {
+                    httpMetadata: { contentType: "application/json", cacheControl: "public, max-age=300" },
+                    customMetadata: {
+                        updated: now,
+                        name: zoneName,
+                        count: sortedPrices.length.toString(),
+                        currency,
+                        res: finalResMin.toString(),
+                        latest: latestTime
                     }
                 });
 
-                // Write to R2 only if meaningful changes were found or it's a completely new file
-                if (dataChanged || existingPrices.length === 0) {
-                    
-                    const pruneLimit = new Date(Date.now() - 48 * 3600 * 1000).toISOString();
-                    const sortedPrices = Array.from(priceMap, ([time, price]) => ({ time, price }))
-                        .filter(item => item.time >= pruneLimit)
-                        .sort((a, b) => new Date(a.time) - new Date(b.time));
-
-                    const now = new Date().toISOString();
-                    const latestTime = sortedPrices.length > 0 ? sortedPrices[sortedPrices.length - 1].time : now;
-
-                    const zoneJsonPayload = {
-                        zone: zoneEic,
-                        name: zoneName,
-                        license: LICENSE_TEXT,
-                        updated: now,
-                        points: sortedPrices.length,
-                        res: `${resMin}m`,
-                        data: sortedPrices
-                    };
-
-                    await env.ENTSOE_PRICES_R2_BUCKET.put(fileName, JSON.stringify(zoneJsonPayload), {
-                        httpMetadata: { contentType: "application/json", cacheControl: "public, max-age=300" },
-                        customMetadata: {
-                            updated: now,
-                            name: zoneName,
-                            count: sortedPrices.length.toString(),
-                            currency,
-                            res: resMin.toString(),
-                            seq: incomingSeq.toString(),
-                            latest: latestTime
-                        }
-                    });
-
-                    await this.updateStatusFile(env, now);
-                }
+                await this.updateStatusFile(env, now);
             }
         }
     } catch (e) { console.error("Data processing error:", e); }
   },
 
   async updateStatusFile(env, lastPushTime) {
-    const todayTarget = new Date(); todayTarget.setUTCHours(23, 0, 0, 0);
+    const todayTarget = new Date(); 
+    // V5 BUGFIX 3: Safe baseline for European midnight (Winter = 23:00, Summer/CEST = 22:00)
+    todayTarget.setUTCHours(22, 0, 0, 0); 
     const tomorrowTarget = new Date(todayTarget); tomorrowTarget.setDate(tomorrowTarget.getDate() + 1);
 
     const listed = await env.ENTSOE_PRICES_R2_BUCKET.list({ include: ['customMetadata'] });
@@ -249,12 +255,10 @@ export default {
                 is_complete_tomorrow: isCompleteTomorrow, 
                 points: parseInt(meta.count || "0"), 
                 res: `${meta.res || "60"}m`, 
-                seq: meta.seq || "1", 
                 curr: meta.currency || "EUR" 
             };
         });
 
-    // Sort descending by 'updated' timestamp (Newest files on top)
     zones.sort((a, b) => {
         const timeA = a.updated === "N/A" ? 0 : new Date(a.updated).getTime();
         const timeB = b.updated === "N/A" ? 0 : new Date(b.updated).getTime();
@@ -265,7 +269,7 @@ export default {
     const ratioTomorrow = zones.length > 0 ? (zones.filter(z => z.is_complete_tomorrow).length / zones.length) : 0;
 
     const statusPayload = { 
-        bridge: "PBTH Energy Bridge Pro (v4.7 R2 Edition)", 
+        bridge: "PBTH Energy Bridge Pro (v5.0 R2 Edition)", 
         license: LICENSE_TEXT,
         summary: { 
             total_zones: zones.length, 
