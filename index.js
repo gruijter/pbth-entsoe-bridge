@@ -5,7 +5,7 @@
 	Copyright 2026, Gruijter.org / Robin de Gruijter <gruijter@hotmail.com> */
 
 /**
- * Power by the Hour - ENTSO-E Energy Bridge (v5.1 R2 Edition - Clean Rewrite)
+ * Power by the Hour - ENTSO-E Energy Bridge (v5.2 R2 Edition - Timezone Patch)
  *
  * API ENDPOINTS:
  * https://entsoe.gruijter.org                          -> POST endpoint for ENTSO-E Webservice
@@ -61,11 +61,9 @@ export default {
     const url = new URL(request.url);
     if (url.pathname === '/favicon.ico') return new Response(null, { status: 204 });
 
-    // --- POST HANDLING (ENTSO-E Data Push) ---
     if (request.method === "POST") {
       try {
         const xmlData = await request.text();
-        
         if (xmlData.length > 50) {
           ctx.waitUntil(this.processData(xmlData, env));
         } else {
@@ -94,7 +92,6 @@ export default {
       }
     }
 
-    // --- GET HANDLING (Client Requests) ---
     if (request.method === "GET") {
         if (url.searchParams.has("init")) {
             await this.updateStatusFile(env, new Date().toISOString());
@@ -107,13 +104,12 @@ export default {
         if (zone) {
             return Response.redirect(`${PUBLIC_R2_URL}/${zone}.json`, 301);
         }
-        return new Response("PBTH Energy Bridge v5.1 (R2 Edition) Online. Please use the public URL: " + PUBLIC_R2_URL, { status: 200 });
+        return new Response("PBTH Energy Bridge v5.2 (R2 Edition) Online. Please use the public URL: " + PUBLIC_R2_URL, { status: 200 });
     }
 
     return new Response("Method not allowed", { status: 405 });
   },
 
-  // --- DATA PROCESSING & R2 STORAGE ---
   async processData(xmlData, env) {
     try {
         const zoneEic = getTagValue(xmlData, "out_Domain.mRID");
@@ -123,9 +119,8 @@ export default {
         const zoneName = ZONE_NAMES[zoneEic] || zoneNameRaw || zoneEic;
         const currency = getTagValue(xmlData, "currency_Unit.name") || "EUR";
         const newPrices = [];
-        let finalResMin = 60; // Fallback
+        let finalResMin = 60; 
         
-        // V5.1 BUGFIX 3: Strictly iterate over individual <Period> blocks
         const periodRegex = /<[^>]*Period(?:\s[^>]*)?>([\s\S]*?)<\/[^>]*Period>/ig;
         let periodMatch;
         
@@ -140,7 +135,6 @@ export default {
             const resMin = resolutionRaw.includes("PT15M") ? 15 : 60;
             finalResMin = resMin; 
             
-            // V5.1 BUGFIX 1: Negative prices supported via [-\d.]
             const pointRegex = /<[^>]*Point(?:[\s\S]*?)?>[\s\S]*?<[^>]*position(?:[\s\S]*?)?>(\d+)<\/[^>]*position>[\s\S]*?<[^>]*price\.amount(?:[\s\S]*?)?>([-\d.]+)<\/[^>]*price\.amount>[\s\S]*?<\/[^>]*Point>/ig;
             let pointMatch;
             
@@ -169,7 +163,6 @@ export default {
             let dataChanged = false;
             const priceMap = new Map(existingPrices.map(obj => [obj.time, obj.price]));
             
-            // V5.1 BUGFIX 4: Smart Diff overrides revision lockouts
             newPrices.forEach(item => {
                 if (!priceMap.has(item.time) || priceMap.get(item.time) !== item.price) {
                     priceMap.set(item.time, item.price);
@@ -178,7 +171,6 @@ export default {
             });
 
             if (dataChanged || existingPrices.length === 0) {
-                
                 const pruneLimit = new Date(Date.now() - 48 * 3600 * 1000).toISOString();
                 const sortedPrices = Array.from(priceMap, ([time, price]) => ({ time, price }))
                     .filter(item => item.time >= pruneLimit)
@@ -216,7 +208,6 @@ export default {
   },
 
   async updateStatusFile(env, lastPushTime) {
-    // V5.1 BUGFIX 2: Smart DST detector for correct UTC midnight targeting
     const isDST = (d) => {
         const year = d.getUTCFullYear();
         const march = new Date(Date.UTC(year, 2, 31)); 
@@ -228,16 +219,20 @@ export default {
         return d >= lastSunMarch && d < lastSunOct;
     };
 
-    const todayTarget = new Date();
-    todayTarget.setUTCHours(0, 0, 0, 0);
+    const nowUTC = new Date();
+    const todayUTC = new Date(Date.UTC(nowUTC.getUTCFullYear(), nowUTC.getUTCMonth(), nowUTC.getUTCDate()));
+    const tomorrowUTC = new Date(todayUTC); 
+    tomorrowUTC.setUTCDate(tomorrowUTC.getUTCDate() + 1);
 
-    const targetHourToday = isDST(todayTarget) ? 22 : 23;
-    todayTarget.setUTCHours(targetHourToday, 0, 0, 0);
+    const isTodayDST = isDST(todayUTC);
+    const isTomorrowDST = isDST(tomorrowUTC);
 
-    const tomorrowTarget = new Date(todayTarget); 
-    tomorrowTarget.setDate(tomorrowTarget.getDate() + 1);
-    const targetHourTomorrow = isDST(tomorrowTarget) ? 22 : 23;
-    tomorrowTarget.setUTCHours(targetHourTomorrow, 0, 0, 0);
+    // EIC codes per timezone group
+    const wetZones = ["10Y1001A1001A92E", "10Y1001A1001A016", "10YPT-REN------W"]; // UK, IE, PT
+    const eetZones = [
+        "10YFI-1--------U", "10Y1001A1001A39I", "10YLV-1001A00074", "10YLT-1001A0008Q", 
+        "10YGR-HTSO-----Y", "10YCA-BULGARIA-R", "10YRO-TEL------P", "10Y1001C--000182", "10Y1001C--00096J"
+    ]; // FI, EE, LV, LT, GR, BG, RO, UA, MD
 
     const listed = await env.ENTSOE_PRICES_R2_BUCKET.list({ include: ['customMetadata'] });
     
@@ -247,17 +242,35 @@ export default {
             const meta = k.customMetadata || {};
             let isCompleteToday = false;
             let isCompleteTomorrow = false;
+            const eic = k.key.replace('.json', '');
             
             if (meta.latest) {
                 const latestDate = new Date(meta.latest);
                 const resMinutes = parseInt(meta.res || "60");
                 const endTime = new Date(latestDate.getTime() + resMinutes * 60000);
                 
-                isCompleteToday = endTime >= todayTarget;
-                isCompleteTomorrow = endTime >= tomorrowTarget;
+                // Determine accurate UTC target hour based on zone geography
+                let targetHourToday = isTodayDST ? 22 : 23;
+                let targetHourTomorrow = isTomorrowDST ? 22 : 23;
+
+                if (wetZones.includes(eic)) {
+                    targetHourToday = isTodayDST ? 23 : 24; // 24 = 00:00 next day
+                    targetHourTomorrow = isTomorrowDST ? 23 : 24;
+                } else if (eetZones.includes(eic)) {
+                    targetHourToday = isTodayDST ? 21 : 22;
+                    targetHourTomorrow = isTomorrowDST ? 21 : 22;
+                }
+
+                const zoneTodayTarget = new Date(todayUTC); 
+                zoneTodayTarget.setUTCHours(targetHourToday, 0, 0, 0);
+                
+                const zoneTomorrowTarget = new Date(tomorrowUTC); 
+                zoneTomorrowTarget.setUTCHours(targetHourTomorrow, 0, 0, 0);
+
+                isCompleteToday = endTime >= zoneTodayTarget;
+                isCompleteTomorrow = endTime >= zoneTomorrowTarget;
             }
             
-            const eic = k.key.replace('.json', '');
             return { 
                 zone: eic, 
                 name: meta.name || ZONE_NAMES[eic] || "N/A", 
@@ -281,7 +294,7 @@ export default {
     const ratioTomorrow = zones.length > 0 ? (zones.filter(z => z.is_complete_tomorrow).length / zones.length) : 0;
 
     const statusPayload = { 
-        bridge: "PBTH Energy Bridge Pro (v5.1 R2 Edition)", 
+        bridge: "PBTH Energy Bridge Pro (v5.2 R2 Edition)", 
         license: LICENSE_TEXT,
         summary: { 
             total_zones: zones.length, 
