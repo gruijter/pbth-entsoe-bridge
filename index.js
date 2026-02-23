@@ -5,7 +5,7 @@
 	Copyright 2026, Gruijter.org / Robin de Gruijter <gruijter@hotmail.com> */
 
 /**
- * Power by the Hour - ENTSO-E Energy Bridge (v5.0 R2 Edition - Clean Rewrite)
+ * Power by the Hour - ENTSO-E Energy Bridge (v5.1 R2 Edition - Clean Rewrite)
  *
  * API ENDPOINTS:
  * https://entsoe.gruijter.org                          -> POST endpoint for ENTSO-E Webservice
@@ -107,7 +107,7 @@ export default {
         if (zone) {
             return Response.redirect(`${PUBLIC_R2_URL}/${zone}.json`, 301);
         }
-        return new Response("PBTH Energy Bridge v5.0 (R2 Edition) Online. Please use the public URL: " + PUBLIC_R2_URL, { status: 200 });
+        return new Response("PBTH Energy Bridge v5.1 (R2 Edition) Online. Please use the public URL: " + PUBLIC_R2_URL, { status: 200 });
     }
 
     return new Response("Method not allowed", { status: 405 });
@@ -125,24 +125,22 @@ export default {
         const newPrices = [];
         let finalResMin = 60; // Fallback
         
-        // V5 BUGFIX 1: Strictly iterate over individual <Period> blocks to prevent timestamps overwriting
-        // each other when ENTSO-E pushes multiple days in a single document.
+        // V5.1 BUGFIX 3: Strictly iterate over individual <Period> blocks
         const periodRegex = /<[^>]*Period(?:\s[^>]*)?>([\s\S]*?)<\/[^>]*Period>/ig;
         let periodMatch;
         
         while ((periodMatch = periodRegex.exec(xmlData)) !== null) {
             const periodXml = periodMatch[1];
             
-            // Extract the dedicated start time and resolution for THIS specific block
             const startRaw = getTagValue(periodXml, "start");
             const resolutionRaw = getTagValue(periodXml, "resolution") || "PT60M";
             if (!startRaw) continue; 
             
             const startTime = new Date(startRaw);
             const resMin = resolutionRaw.includes("PT15M") ? 15 : 60;
-            finalResMin = resMin; // Update final known resolution for metadata
+            finalResMin = resMin; 
             
-            // Extract points, strictly including negative values [-]
+            // V5.1 BUGFIX 1: Negative prices supported via [-\d.]
             const pointRegex = /<[^>]*Point(?:[\s\S]*?)?>[\s\S]*?<[^>]*position(?:[\s\S]*?)?>(\d+)<\/[^>]*position>[\s\S]*?<[^>]*price\.amount(?:[\s\S]*?)?>([-\d.]+)<\/[^>]*price\.amount>[\s\S]*?<\/[^>]*Point>/ig;
             let pointMatch;
             
@@ -160,7 +158,6 @@ export default {
             const fileName = `${zoneEic}.json`;
             let existingPrices = [];
 
-            // Fetch existing data
             const existingObj = await env.ENTSOE_PRICES_R2_BUCKET.get(fileName);
             if (existingObj) {
                 try {
@@ -172,9 +169,7 @@ export default {
             let dataChanged = false;
             const priceMap = new Map(existingPrices.map(obj => [obj.time, obj.price]));
             
-            // V5 BUGFIX 2: Smart Diff overrides the 'seq/revisionNumber' lockout entirely.
-            // Only data that is actually NEW or has a DIFFERENT PRICE is recorded. 
-            // This autonomously fixes the ENTSO-E revision number paradox.
+            // V5.1 BUGFIX 4: Smart Diff overrides revision lockouts
             newPrices.forEach(item => {
                 if (!priceMap.has(item.time) || priceMap.get(item.time) !== item.price) {
                     priceMap.set(item.time, item.price);
@@ -182,10 +177,8 @@ export default {
                 }
             });
 
-            // Write to R2 only if meaningful changes were found or it's a completely new file
             if (dataChanged || existingPrices.length === 0) {
                 
-                // Prune old data (keep only last 48 hours)
                 const pruneLimit = new Date(Date.now() - 48 * 3600 * 1000).toISOString();
                 const sortedPrices = Array.from(priceMap, ([time, price]) => ({ time, price }))
                     .filter(item => item.time >= pruneLimit)
@@ -223,10 +216,28 @@ export default {
   },
 
   async updateStatusFile(env, lastPushTime) {
-    const todayTarget = new Date(); 
-    // V5 BUGFIX 3: Safe baseline for European midnight (Winter = 23:00, Summer/CEST = 22:00)
-    todayTarget.setUTCHours(22, 0, 0, 0); 
-    const tomorrowTarget = new Date(todayTarget); tomorrowTarget.setDate(tomorrowTarget.getDate() + 1);
+    // V5.1 BUGFIX 2: Smart DST detector for correct UTC midnight targeting
+    const isDST = (d) => {
+        const year = d.getUTCFullYear();
+        const march = new Date(Date.UTC(year, 2, 31)); 
+        const oct = new Date(Date.UTC(year, 9, 31));   
+        const lastSunMarch = new Date(march.getTime() - march.getUTCDay() * 86400000);
+        const lastSunOct = new Date(oct.getTime() - oct.getUTCDay() * 86400000);
+        lastSunMarch.setUTCHours(1, 0, 0, 0);
+        lastSunOct.setUTCHours(1, 0, 0, 0);
+        return d >= lastSunMarch && d < lastSunOct;
+    };
+
+    const todayTarget = new Date();
+    todayTarget.setUTCHours(0, 0, 0, 0);
+
+    const targetHourToday = isDST(todayTarget) ? 22 : 23;
+    todayTarget.setUTCHours(targetHourToday, 0, 0, 0);
+
+    const tomorrowTarget = new Date(todayTarget); 
+    tomorrowTarget.setDate(tomorrowTarget.getDate() + 1);
+    const targetHourTomorrow = isDST(tomorrowTarget) ? 22 : 23;
+    tomorrowTarget.setUTCHours(targetHourTomorrow, 0, 0, 0);
 
     const listed = await env.ENTSOE_PRICES_R2_BUCKET.list({ include: ['customMetadata'] });
     
@@ -241,6 +252,7 @@ export default {
                 const latestDate = new Date(meta.latest);
                 const resMinutes = parseInt(meta.res || "60");
                 const endTime = new Date(latestDate.getTime() + resMinutes * 60000);
+                
                 isCompleteToday = endTime >= todayTarget;
                 isCompleteTomorrow = endTime >= tomorrowTarget;
             }
@@ -269,7 +281,7 @@ export default {
     const ratioTomorrow = zones.length > 0 ? (zones.filter(z => z.is_complete_tomorrow).length / zones.length) : 0;
 
     const statusPayload = { 
-        bridge: "PBTH Energy Bridge Pro (v5.0 R2 Edition)", 
+        bridge: "PBTH Energy Bridge Pro (v5.1 R2 Edition)", 
         license: LICENSE_TEXT,
         summary: { 
             total_zones: zones.length, 
