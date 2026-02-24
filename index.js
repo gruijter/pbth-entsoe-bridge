@@ -5,7 +5,7 @@
 	Copyright 2026, Gruijter.org / Robin de Gruijter <gruijter@hotmail.com> */
 
 /**
- * Power by the Hour - ENTSO-E Energy Bridge (v6.0 R2 Edition - True IANA Timezones)
+ * Power by the Hour - ENTSO-E Energy Bridge (v6.1 R2 Edition - Resolution Enforcer)
  *
  * API ENDPOINTS:
  * https://entsoe.gruijter.org                          -> POST endpoint for ENTSO-E Webservice
@@ -104,7 +104,7 @@ export default {
         if (zone) {
             return Response.redirect(`${PUBLIC_R2_URL}/${zone}.json`, 301);
         }
-        return new Response("PBTH Energy Bridge v6.0 (R2 Edition) Online. Please use the public URL: " + PUBLIC_R2_URL, { status: 200 });
+        return new Response("PBTH Energy Bridge v6.1 (R2 Edition) Online. Please use the public URL: " + PUBLIC_R2_URL, { status: 200 });
     }
 
     return new Response("Method not allowed", { status: 405 });
@@ -119,7 +119,13 @@ export default {
         const zoneName = ZONE_NAMES[zoneEic] || zoneNameRaw || zoneEic;
         const currency = getTagValue(xmlData, "currency_Unit.name") || "EUR";
         const newPrices = [];
-        let finalResMin = 60; 
+        
+        // V6.1 BUGFIX: Enforce a single resolution for the entire document
+        // If PT15M exists anywhere in the payload, we exclusively process 15m blocks.
+        let targetResMin = 60; 
+        if (xmlData.includes("PT15M")) {
+            targetResMin = 15;
+        }
         
         const periodRegex = /<[^>]*Period(?:\s[^>]*)?>([\s\S]*?)<\/[^>]*Period>/ig;
         let periodMatch;
@@ -131,9 +137,14 @@ export default {
             const resolutionRaw = getTagValue(periodXml, "resolution") || "PT60M";
             if (!startRaw) continue; 
             
-            const startTime = new Date(startRaw);
             const resMin = resolutionRaw.includes("PT15M") ? 15 : 60;
-            finalResMin = resMin; 
+            
+            // Skip this period block if it doesn't match our enforced resolution
+            if (resMin !== targetResMin) {
+                continue; 
+            }
+            
+            const startTime = new Date(startRaw);
             
             const pointRegex = /<[^>]*Point(?:[\s\S]*?)?>[\s\S]*?<[^>]*position(?:[\s\S]*?)?>(\d+)<\/[^>]*position>[\s\S]*?<[^>]*price\.amount(?:[\s\S]*?)?>([-\d.]+)<\/[^>]*price\.amount>[\s\S]*?<\/[^>]*Point>/ig;
             let pointMatch;
@@ -185,7 +196,7 @@ export default {
                     license: LICENSE_TEXT,
                     updated: now,
                     points: sortedPrices.length,
-                    res: `${finalResMin}m`,
+                    res: `${targetResMin}m`,
                     data: sortedPrices
                 };
 
@@ -196,7 +207,7 @@ export default {
                         name: zoneName,
                         count: sortedPrices.length.toString(),
                         currency,
-                        res: finalResMin.toString(),
+                        res: targetResMin.toString(),
                         latest: latestTime
                     }
                 });
@@ -208,7 +219,6 @@ export default {
   },
 
   async updateStatusFile(env, lastPushTime) {
-    // 1. Map ENTSO-E Zones to accurate IANA Timezones
     const getZoneTZ = (eic) => {
         const wetZones = ["10Y1001A1001A92E", "10Y1001A1001A016", "10YPT-REN------W"];
         const eetZones = [
@@ -223,7 +233,6 @@ export default {
         return "Europe/Paris"; // Default CET/CEST
     };
 
-    // 2. Helper to extract the exact local Date/Time from a UTC timestamp
     const getSyntheticLocalTime = (utcDate, tz) => {
         const parts = new Intl.DateTimeFormat('en-US', { 
             timeZone: tz, year: 'numeric', month: '2-digit', day: '2-digit',
@@ -234,7 +243,6 @@ export default {
         parts.forEach(part => p[part.type] = part.value);
         if (p.hour === '24') p.hour = '00';
         
-        // Return as a comparable timestamp
         return new Date(`${p.year}-${p.month}-${p.day}T${p.hour}:${p.minute}:${p.second}.000Z`).getTime();
     };
 
@@ -252,17 +260,14 @@ export default {
             if (meta.latest) {
                 const tz = getZoneTZ(eic);
                 
-                // Construct "Local Midnights"
                 const syntheticNow = new Date(getSyntheticLocalTime(now, tz));
                 const tomorrowMidnight = new Date(Date.UTC(syntheticNow.getUTCFullYear(), syntheticNow.getUTCMonth(), syntheticNow.getUTCDate() + 1)).getTime();
                 const dayAfterMidnight = new Date(Date.UTC(syntheticNow.getUTCFullYear(), syntheticNow.getUTCMonth(), syntheticNow.getUTCDate() + 2)).getTime();
                 
-                // Construct the "Local End Time" of the available data
                 const resMinutes = parseInt(meta.res || "60");
                 const endTimeUTC = new Date(new Date(meta.latest).getTime() + resMinutes * 60000);
                 const syntheticEnd = getSyntheticLocalTime(endTimeUTC, tz);
                 
-                // Check if data reaches precisely the local midnights
                 isCompleteToday = syntheticEnd >= tomorrowMidnight;
                 isCompleteTomorrow = syntheticEnd >= dayAfterMidnight;
             }
@@ -290,7 +295,7 @@ export default {
     const ratioTomorrow = zones.length > 0 ? (zones.filter(z => z.is_complete_tomorrow).length / zones.length) : 0;
 
     const statusPayload = { 
-        bridge: "PBTH Energy Bridge Pro (v6.0 R2 Edition)", 
+        bridge: "PBTH Energy Bridge Pro (v6.1 R2 Edition)", 
         license: LICENSE_TEXT,
         summary: { 
             total_zones: zones.length, 
