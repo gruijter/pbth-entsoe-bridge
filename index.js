@@ -5,7 +5,7 @@
 	Copyright 2026, Gruijter.org / Robin de Gruijter <gruijter@hotmail.com> */
 
 /**
- * Power by the Hour - ENTSO-E Energy Bridge (v5.2 R2 Edition - Timezone Patch)
+ * Power by the Hour - ENTSO-E Energy Bridge (v6.0 R2 Edition - True IANA Timezones)
  *
  * API ENDPOINTS:
  * https://entsoe.gruijter.org                          -> POST endpoint for ENTSO-E Webservice
@@ -104,7 +104,7 @@ export default {
         if (zone) {
             return Response.redirect(`${PUBLIC_R2_URL}/${zone}.json`, 301);
         }
-        return new Response("PBTH Energy Bridge v5.2 (R2 Edition) Online. Please use the public URL: " + PUBLIC_R2_URL, { status: 200 });
+        return new Response("PBTH Energy Bridge v6.0 (R2 Edition) Online. Please use the public URL: " + PUBLIC_R2_URL, { status: 200 });
     }
 
     return new Response("Method not allowed", { status: 405 });
@@ -208,67 +208,63 @@ export default {
   },
 
   async updateStatusFile(env, lastPushTime) {
-    const isDST = (d) => {
-        const year = d.getUTCFullYear();
-        const march = new Date(Date.UTC(year, 2, 31)); 
-        const oct = new Date(Date.UTC(year, 9, 31));   
-        const lastSunMarch = new Date(march.getTime() - march.getUTCDay() * 86400000);
-        const lastSunOct = new Date(oct.getTime() - oct.getUTCDay() * 86400000);
-        lastSunMarch.setUTCHours(1, 0, 0, 0);
-        lastSunOct.setUTCHours(1, 0, 0, 0);
-        return d >= lastSunMarch && d < lastSunOct;
+    // 1. Map ENTSO-E Zones to accurate IANA Timezones
+    const getZoneTZ = (eic) => {
+        const wetZones = ["10Y1001A1001A92E", "10Y1001A1001A016", "10YPT-REN------W"];
+        const eetZones = [
+            "10YFI-1--------U", "10Y1001A1001A39I", "10YLV-1001A00074", "10YLT-1001A0008Q", 
+            "10YGR-HTSO-----Y", "10YCA-BULGARIA-R", "10YRO-TEL------P", "10Y1001C--000182", "10Y1001C--00096J"
+        ];
+        const trtZones = ["10YTR-TEIAS----W"];
+        
+        if (wetZones.includes(eic)) return "Europe/London";
+        if (eetZones.includes(eic)) return "Europe/Helsinki";
+        if (trtZones.includes(eic)) return "Europe/Istanbul";
+        return "Europe/Paris"; // Default CET/CEST
     };
 
-    const nowUTC = new Date();
-    const todayUTC = new Date(Date.UTC(nowUTC.getUTCFullYear(), nowUTC.getUTCMonth(), nowUTC.getUTCDate()));
-    const tomorrowUTC = new Date(todayUTC); 
-    tomorrowUTC.setUTCDate(tomorrowUTC.getUTCDate() + 1);
+    // 2. Helper to extract the exact local Date/Time from a UTC timestamp
+    const getSyntheticLocalTime = (utcDate, tz) => {
+        const parts = new Intl.DateTimeFormat('en-US', { 
+            timeZone: tz, year: 'numeric', month: '2-digit', day: '2-digit',
+            hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false
+        }).formatToParts(utcDate);
+        
+        const p = {};
+        parts.forEach(part => p[part.type] = part.value);
+        if (p.hour === '24') p.hour = '00';
+        
+        // Return as a comparable timestamp
+        return new Date(`${p.year}-${p.month}-${p.day}T${p.hour}:${p.minute}:${p.second}.000Z`).getTime();
+    };
 
-    const isTodayDST = isDST(todayUTC);
-    const isTomorrowDST = isDST(tomorrowUTC);
-
-    // EIC codes per timezone group
-    const wetZones = ["10Y1001A1001A92E", "10Y1001A1001A016", "10YPT-REN------W"]; // UK, IE, PT
-    const eetZones = [
-        "10YFI-1--------U", "10Y1001A1001A39I", "10YLV-1001A00074", "10YLT-1001A0008Q", 
-        "10YGR-HTSO-----Y", "10YCA-BULGARIA-R", "10YRO-TEL------P", "10Y1001C--000182", "10Y1001C--00096J"
-    ]; // FI, EE, LV, LT, GR, BG, RO, UA, MD
-
+    const now = new Date();
     const listed = await env.ENTSOE_PRICES_R2_BUCKET.list({ include: ['customMetadata'] });
     
     let zones = listed.objects
         .filter(k => k.key !== 'status.json' && k.key.endsWith('.json'))
         .map(k => {
             const meta = k.customMetadata || {};
+            const eic = k.key.replace('.json', '');
             let isCompleteToday = false;
             let isCompleteTomorrow = false;
-            const eic = k.key.replace('.json', '');
             
             if (meta.latest) {
-                const latestDate = new Date(meta.latest);
+                const tz = getZoneTZ(eic);
+                
+                // Construct "Local Midnights"
+                const syntheticNow = new Date(getSyntheticLocalTime(now, tz));
+                const tomorrowMidnight = new Date(Date.UTC(syntheticNow.getUTCFullYear(), syntheticNow.getUTCMonth(), syntheticNow.getUTCDate() + 1)).getTime();
+                const dayAfterMidnight = new Date(Date.UTC(syntheticNow.getUTCFullYear(), syntheticNow.getUTCMonth(), syntheticNow.getUTCDate() + 2)).getTime();
+                
+                // Construct the "Local End Time" of the available data
                 const resMinutes = parseInt(meta.res || "60");
-                const endTime = new Date(latestDate.getTime() + resMinutes * 60000);
+                const endTimeUTC = new Date(new Date(meta.latest).getTime() + resMinutes * 60000);
+                const syntheticEnd = getSyntheticLocalTime(endTimeUTC, tz);
                 
-                // Determine accurate UTC target hour based on zone geography
-                let targetHourToday = isTodayDST ? 22 : 23;
-                let targetHourTomorrow = isTomorrowDST ? 22 : 23;
-
-                if (wetZones.includes(eic)) {
-                    targetHourToday = isTodayDST ? 23 : 24; // 24 = 00:00 next day
-                    targetHourTomorrow = isTomorrowDST ? 23 : 24;
-                } else if (eetZones.includes(eic)) {
-                    targetHourToday = isTodayDST ? 21 : 22;
-                    targetHourTomorrow = isTomorrowDST ? 21 : 22;
-                }
-
-                const zoneTodayTarget = new Date(todayUTC); 
-                zoneTodayTarget.setUTCHours(targetHourToday, 0, 0, 0);
-                
-                const zoneTomorrowTarget = new Date(tomorrowUTC); 
-                zoneTomorrowTarget.setUTCHours(targetHourTomorrow, 0, 0, 0);
-
-                isCompleteToday = endTime >= zoneTodayTarget;
-                isCompleteTomorrow = endTime >= zoneTomorrowTarget;
+                // Check if data reaches precisely the local midnights
+                isCompleteToday = syntheticEnd >= tomorrowMidnight;
+                isCompleteTomorrow = syntheticEnd >= dayAfterMidnight;
             }
             
             return { 
@@ -294,7 +290,7 @@ export default {
     const ratioTomorrow = zones.length > 0 ? (zones.filter(z => z.is_complete_tomorrow).length / zones.length) : 0;
 
     const statusPayload = { 
-        bridge: "PBTH Energy Bridge Pro (v5.2 R2 Edition)", 
+        bridge: "PBTH Energy Bridge Pro (v6.0 R2 Edition)", 
         license: LICENSE_TEXT,
         summary: { 
             total_zones: zones.length, 
