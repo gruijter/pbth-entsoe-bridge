@@ -5,7 +5,7 @@
 	Copyright 2026, Gruijter.org / Robin de Gruijter <gruijter@hotmail.com> */
 
 /**
- * Power by the Hour - ENTSO-E Energy Bridge (v6.1 R2 Edition - Resolution Enforcer)
+ * Power by the Hour - ENTSO-E Energy Bridge v6.2 R2 Edition - Semantic Midnight Fix
  *
  * API ENDPOINTS:
  * https://entsoe.gruijter.org                          -> POST endpoint for ENTSO-E Webservice
@@ -104,7 +104,7 @@ export default {
         if (zone) {
             return Response.redirect(`${PUBLIC_R2_URL}/${zone}.json`, 301);
         }
-        return new Response("PBTH Energy Bridge v6.1 (R2 Edition) Online. Please use the public URL: " + PUBLIC_R2_URL, { status: 200 });
+        return new Response("PBTH Energy Bridge v6.2 (R2 Edition) Online. Please use the public URL: " + PUBLIC_R2_URL, { status: 200 });
     }
 
     return new Response("Method not allowed", { status: 405 });
@@ -120,8 +120,6 @@ export default {
         const currency = getTagValue(xmlData, "currency_Unit.name") || "EUR";
         const newPrices = [];
         
-        // V6.1 BUGFIX: Enforce a single resolution for the entire document
-        // If PT15M exists anywhere in the payload, we exclusively process 15m blocks.
         let targetResMin = 60; 
         if (xmlData.includes("PT15M")) {
             targetResMin = 15;
@@ -139,7 +137,6 @@ export default {
             
             const resMin = resolutionRaw.includes("PT15M") ? 15 : 60;
             
-            // Skip this period block if it doesn't match our enforced resolution
             if (resMin !== targetResMin) {
                 continue; 
             }
@@ -230,7 +227,7 @@ export default {
         if (wetZones.includes(eic)) return "Europe/London";
         if (eetZones.includes(eic)) return "Europe/Helsinki";
         if (trtZones.includes(eic)) return "Europe/Istanbul";
-        return "Europe/Paris"; // Default CET/CEST
+        return "Europe/Paris"; 
     };
 
     const getSyntheticLocalTime = (utcDate, tz) => {
@@ -243,10 +240,10 @@ export default {
         parts.forEach(part => p[part.type] = part.value);
         if (p.hour === '24') p.hour = '00';
         
-        return new Date(`${p.year}-${p.month}-${p.day}T${p.hour}:${p.minute}:${p.second}.000Z`).getTime();
+        return new Date(`${p.year}-${p.month}-${p.day}T${p.hour}:${p.minute}:${p.second}.000Z`);
     };
 
-    const now = new Date();
+    const nowUTC = new Date();
     const listed = await env.ENTSOE_PRICES_R2_BUCKET.list({ include: ['customMetadata'] });
     
     let zones = listed.objects
@@ -260,16 +257,26 @@ export default {
             if (meta.latest) {
                 const tz = getZoneTZ(eic);
                 
-                const syntheticNow = new Date(getSyntheticLocalTime(now, tz));
-                const tomorrowMidnight = new Date(Date.UTC(syntheticNow.getUTCFullYear(), syntheticNow.getUTCMonth(), syntheticNow.getUTCDate() + 1)).getTime();
-                const dayAfterMidnight = new Date(Date.UTC(syntheticNow.getUTCFullYear(), syntheticNow.getUTCMonth(), syntheticNow.getUTCDate() + 2)).getTime();
+                // 1. Establish the current synthetic local date (ignoring time)
+                const syntheticNow = getSyntheticLocalTime(nowUTC, tz);
+                const currentLocalYear = syntheticNow.getUTCFullYear();
+                const currentLocalMonth = syntheticNow.getUTCMonth();
+                const currentLocalDay = syntheticNow.getUTCDate();
                 
+                // 2. Define exactly what "Today" and "Tomorrow" mean in local calendar terms
+                // Midnight Tonight (end of current local day)
+                const currentDayMidnight = new Date(Date.UTC(currentLocalYear, currentLocalMonth, currentLocalDay + 1)).getTime();
+                // Midnight Tomorrow Night (end of next local day)
+                const nextDayMidnight = new Date(Date.UTC(currentLocalYear, currentLocalMonth, currentLocalDay + 2)).getTime();
+                
+                // 3. Translate the latest available data point into synthetic local time
                 const resMinutes = parseInt(meta.res || "60");
                 const endTimeUTC = new Date(new Date(meta.latest).getTime() + resMinutes * 60000);
-                const syntheticEnd = getSyntheticLocalTime(endTimeUTC, tz);
+                const syntheticEnd = getSyntheticLocalTime(endTimeUTC, tz).getTime();
                 
-                isCompleteToday = syntheticEnd >= tomorrowMidnight;
-                isCompleteTomorrow = syntheticEnd >= dayAfterMidnight;
+                // 4. Validate if the available data strictly reaches or exceeds the local midnights
+                isCompleteToday = syntheticEnd >= currentDayMidnight;
+                isCompleteTomorrow = syntheticEnd >= nextDayMidnight;
             }
             
             return { 
@@ -295,7 +302,7 @@ export default {
     const ratioTomorrow = zones.length > 0 ? (zones.filter(z => z.is_complete_tomorrow).length / zones.length) : 0;
 
     const statusPayload = { 
-        bridge: "PBTH Energy Bridge Pro (v6.1 R2 Edition)", 
+        bridge: "PBTH Energy Bridge Pro (v6.2 R2 Edition)", 
         license: LICENSE_TEXT,
         summary: { 
             total_zones: zones.length, 
