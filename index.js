@@ -5,26 +5,13 @@
 	Copyright 2026, Gruijter.org / Robin de Gruijter <gruijter@hotmail.com> */
 
 /**
- * Power by the Hour - v6.3 R2 Edition - Dynamic MTU Parser
+ * Power by the Hour - v6.4 R2 Edition - Dynamic MTU Parser
  *
  * API ENDPOINTS:
  * https://entsoe.gruijter.org                          -> POST endpoint for ENTSO-E Webservice
  * https://entsoe.gruijter.org/?init=true               -> Manually force the generation of the status.json file in R2
  * https://entsoe-prices.gruijter.org/status.json       -> Get bridge health & available zones
  * https://entsoe-prices.gruijter.org/[EIC_CODE].json   -> Get specific zone prices
- */
-
-
-/**
- * Power by the Hour - ENTSO-E Energy Bridge (v6.3 R2 Edition - Dynamic MTU Parser)
- *
- * CRITICAL FIXES IN V6.3:
- * 1. Dynamic MTU Calculation: The parser no longer relies on the often-incorrect `<resolution>` 
- * tag provided by TSOs. It now calculates the step-size dynamically based on the 
- * TimeInterval bounds and the number of points in the period. This strictly prevents 
- * dropping the final 15m intervals (e.g. 22:45) during TSO transitions.
- * 2. Semantic Local Midnight: Validates 'today'/'tomorrow' completeness using IANA timezones.
- * 3. Negative Prices: Fully supported via `[-\d.]`.
  */
 
 const ZONE_NAMES = {
@@ -117,7 +104,7 @@ export default {
         if (zone) {
             return Response.redirect(`${PUBLIC_R2_URL}/${zone}.json`, 301);
         }
-        return new Response("PBTH Energy Bridge v6.3 (R2 Edition) Online. Please use the public URL: " + PUBLIC_R2_URL, { status: 200 });
+        return new Response("PBTH Energy Bridge v6.4 (R2 Edition) Online. Please use the public URL: " + PUBLIC_R2_URL, { status: 200 });
     }
 
     return new Response("Method not allowed", { status: 405 });
@@ -131,16 +118,16 @@ export default {
         const zoneNameRaw = getTagValue(xmlData, "out_Domain.name");
         const zoneName = ZONE_NAMES[zoneEic] || zoneNameRaw || zoneEic;
         const currency = getTagValue(xmlData, "currency_Unit.name") || "EUR";
-        const newPrices = [];
         
         const periodRegex = /<[^>]*Period(?:\s[^>]*)?>([\s\S]*?)<\/[^>]*Period>/ig;
         let periodMatch;
-        let globalResMin = 60; // Fallback for metadata
+        
+        let targetResMin = 60; // Baseline resolution
+        const extractedBlocks = [];
         
         while ((periodMatch = periodRegex.exec(xmlData)) !== null) {
             const periodXml = periodMatch[1];
             
-            // Extract TimeInterval block to guarantee correct start and end boundaries
             const timeIntervalMatch = /<[^>]*timeInterval(?:[\s\S]*?)?>[\s\S]*?<[^>]*start(?:[\s\S]*?)?>([^<]+)<\/[^>]*start>[\s\S]*?<[^>]*end(?:[\s\S]*?)?>([^<]+)<\/[^>]*end>[\s\S]*?<\/[^>]*timeInterval>/i.exec(periodXml);
             if (!timeIntervalMatch) continue;
             
@@ -151,46 +138,39 @@ export default {
             
             if (isNaN(periodStartTime.getTime()) || isNaN(periodEndTime.getTime())) continue;
 
-            // Extract all raw points in this period
             const pointRegex = /<[^>]*Point(?:[\s\S]*?)?>[\s\S]*?<[^>]*position(?:[\s\S]*?)?>(\d+)<\/[^>]*position>[\s\S]*?<[^>]*price\.amount(?:[\s\S]*?)?>([-\d.]+)<\/[^>]*price\.amount>[\s\S]*?<\/[^>]*Point>/ig;
             let pointMatch;
-            const extractedPoints = [];
+            const tempPoints = [];
             
             while ((pointMatch = pointRegex.exec(periodXml)) !== null) {
-                extractedPoints.push({
+                tempPoints.push({
                     pos: parseInt(pointMatch[1]),
                     val: parseFloat(pointMatch[2])
                 });
             }
             
-            if (extractedPoints.length === 0) continue;
+            if (tempPoints.length === 0) continue;
 
-            // V6.3 BUGFIX: Dynamic Resolution Calculation
-            // Instead of trusting the TSO's <resolution> tag, we calculate the exact time-step 
-            // by dividing the total period duration by the number of data points provided.
             const totalDurationMs = periodEndTime.getTime() - periodStartTime.getTime();
-            
-            // Protect against divide-by-zero or malformed single-point periods
-            const expectedPoints = extractedPoints.length;
+            const expectedPoints = tempPoints.length;
             const stepMs = totalDurationMs / expectedPoints; 
             const calcResMin = Math.round(stepMs / 60000);
             
-            if (calcResMin === 15) globalResMin = 15; // Upgrade global resolution if 15m is detected
-            
-            // If the calculated resolution is weird (not 60, 30, or 15), skip this corrupt block
             if (![60, 30, 15].includes(calcResMin)) continue;
+            
+            if (calcResMin < targetResMin) {
+                targetResMin = calcResMin; // Lowest step size defines overall resolution
+            }
 
-            // Map the points to exact timestamps
-            extractedPoints.forEach(pt => {
-                // Position is 1-based, so pos 1 = start time, pos 2 = start time + 1 step, etc.
+            tempPoints.forEach(pt => {
                 const timestamp = new Date(periodStartTime.getTime() + (pt.pos - 1) * stepMs);
                 if (!isNaN(timestamp.getTime()) && !isNaN(pt.val)) {
-                    newPrices.push({ time: timestamp.toISOString(), price: pt.val });
+                    extractedBlocks.push({ time: timestamp.toISOString(), price: pt.val, res: calcResMin });
                 }
             });
         }
 
-        if (newPrices.length > 0) {
+        if (extractedBlocks.length > 0) {
             const fileName = `${zoneEic}.json`;
             let existingPrices = [];
 
@@ -199,23 +179,37 @@ export default {
                 try {
                     const existingData = await existingObj.json();
                     existingPrices = existingData.data || [];
+                    
+                    // Respect the highest resolution already established in R2
+                    const existingResMatch = existingData.res ? parseInt(existingData.res) : 60;
+                    if (existingResMatch < targetResMin) targetResMin = existingResMatch;
+                    
                 } catch(e) {}
             }
             
             let dataChanged = false;
             const priceMap = new Map(existingPrices.map(obj => [obj.time, obj.price]));
             
-            newPrices.forEach(item => {
-                if (!priceMap.has(item.time) || priceMap.get(item.time) !== item.price) {
-                    priceMap.set(item.time, item.price);
-                    dataChanged = true;
+            // Integrate new blocks. If multiple resolutions target the same hour, 
+            // the system organically handles it by accepting the value.
+            extractedBlocks.forEach(item => {
+                // If the block is 60m but target is 15m, extrapolate the 60m point to 4x 15m intervals
+                // This ensures "consecutive order" for PbtH when mixed data is sent
+                const periodsToFill = item.res / targetResMin;
+                const baseTime = new Date(item.time).getTime();
+                
+                for (let i = 0; i < periodsToFill; i++) {
+                    const currentFillTime = new Date(baseTime + i * targetResMin * 60000).toISOString();
+                    if (!priceMap.has(currentFillTime) || priceMap.get(currentFillTime) !== item.price) {
+                        priceMap.set(currentFillTime, item.price);
+                        dataChanged = true;
+                    }
                 }
             });
 
             if (dataChanged || existingPrices.length === 0) {
                 const pruneLimit = new Date(Date.now() - 48 * 3600 * 1000).toISOString();
                 
-                // Sort the map into a final sequential array
                 const sortedPrices = Array.from(priceMap, ([time, price]) => ({ time, price }))
                     .filter(item => item.time >= pruneLimit)
                     .sort((a, b) => new Date(a.time) - new Date(b.time));
@@ -229,7 +223,7 @@ export default {
                     license: LICENSE_TEXT,
                     updated: now,
                     points: sortedPrices.length,
-                    res: `${globalResMin}m`,
+                    res: `${targetResMin}m`,
                     data: sortedPrices
                 };
 
@@ -240,7 +234,7 @@ export default {
                         name: zoneName,
                         count: sortedPrices.length.toString(),
                         currency,
-                        res: globalResMin.toString(),
+                        res: targetResMin.toString(),
                         latest: latestTime
                     }
                 });
@@ -332,7 +326,7 @@ export default {
     const ratioTomorrow = zones.length > 0 ? (zones.filter(z => z.is_complete_tomorrow).length / zones.length) : 0;
 
     const statusPayload = { 
-        bridge: "PBTH Energy Bridge Pro (v6.3 R2 Edition)", 
+        bridge: "PBTH Energy Bridge Pro (v6.4 R2 Edition)", 
         license: LICENSE_TEXT,
         summary: { 
             total_zones: zones.length, 
