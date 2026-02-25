@@ -5,13 +5,26 @@
 	Copyright 2026, Gruijter.org / Robin de Gruijter <gruijter@hotmail.com> */
 
 /**
- * Power by the Hour - ENTSO-E Energy Bridge v6.2 R2 Edition - Semantic Midnight Fix
+ * Power by the Hour - v6.3 R2 Edition - Dynamic MTU Parser
  *
  * API ENDPOINTS:
  * https://entsoe.gruijter.org                          -> POST endpoint for ENTSO-E Webservice
  * https://entsoe.gruijter.org/?init=true               -> Manually force the generation of the status.json file in R2
  * https://entsoe-prices.gruijter.org/status.json       -> Get bridge health & available zones
  * https://entsoe-prices.gruijter.org/[EIC_CODE].json   -> Get specific zone prices
+ */
+
+
+/**
+ * Power by the Hour - ENTSO-E Energy Bridge (v6.3 R2 Edition - Dynamic MTU Parser)
+ *
+ * CRITICAL FIXES IN V6.3:
+ * 1. Dynamic MTU Calculation: The parser no longer relies on the often-incorrect `<resolution>` 
+ * tag provided by TSOs. It now calculates the step-size dynamically based on the 
+ * TimeInterval bounds and the number of points in the period. This strictly prevents 
+ * dropping the final 15m intervals (e.g. 22:45) during TSO transitions.
+ * 2. Semantic Local Midnight: Validates 'today'/'tomorrow' completeness using IANA timezones.
+ * 3. Negative Prices: Fully supported via `[-\d.]`.
  */
 
 const ZONE_NAMES = {
@@ -104,7 +117,7 @@ export default {
         if (zone) {
             return Response.redirect(`${PUBLIC_R2_URL}/${zone}.json`, 301);
         }
-        return new Response("PBTH Energy Bridge v6.2 (R2 Edition) Online. Please use the public URL: " + PUBLIC_R2_URL, { status: 200 });
+        return new Response("PBTH Energy Bridge v6.3 (R2 Edition) Online. Please use the public URL: " + PUBLIC_R2_URL, { status: 200 });
     }
 
     return new Response("Method not allowed", { status: 405 });
@@ -120,40 +133,61 @@ export default {
         const currency = getTagValue(xmlData, "currency_Unit.name") || "EUR";
         const newPrices = [];
         
-        let targetResMin = 60; 
-        if (xmlData.includes("PT15M")) {
-            targetResMin = 15;
-        }
-        
         const periodRegex = /<[^>]*Period(?:\s[^>]*)?>([\s\S]*?)<\/[^>]*Period>/ig;
         let periodMatch;
+        let globalResMin = 60; // Fallback for metadata
         
         while ((periodMatch = periodRegex.exec(xmlData)) !== null) {
             const periodXml = periodMatch[1];
             
-            const startRaw = getTagValue(periodXml, "start");
-            const resolutionRaw = getTagValue(periodXml, "resolution") || "PT60M";
-            if (!startRaw) continue; 
+            // Extract TimeInterval block to guarantee correct start and end boundaries
+            const timeIntervalMatch = /<[^>]*timeInterval(?:[\s\S]*?)?>[\s\S]*?<[^>]*start(?:[\s\S]*?)?>([^<]+)<\/[^>]*start>[\s\S]*?<[^>]*end(?:[\s\S]*?)?>([^<]+)<\/[^>]*end>[\s\S]*?<\/[^>]*timeInterval>/i.exec(periodXml);
+            if (!timeIntervalMatch) continue;
             
-            const resMin = resolutionRaw.includes("PT15M") ? 15 : 60;
+            const startStr = timeIntervalMatch[1].trim();
+            const endStr = timeIntervalMatch[2].trim();
+            const periodStartTime = new Date(startStr);
+            const periodEndTime = new Date(endStr);
             
-            if (resMin !== targetResMin) {
-                continue; 
-            }
-            
-            const startTime = new Date(startRaw);
-            
+            if (isNaN(periodStartTime.getTime()) || isNaN(periodEndTime.getTime())) continue;
+
+            // Extract all raw points in this period
             const pointRegex = /<[^>]*Point(?:[\s\S]*?)?>[\s\S]*?<[^>]*position(?:[\s\S]*?)?>(\d+)<\/[^>]*position>[\s\S]*?<[^>]*price\.amount(?:[\s\S]*?)?>([-\d.]+)<\/[^>]*price\.amount>[\s\S]*?<\/[^>]*Point>/ig;
             let pointMatch;
+            const extractedPoints = [];
             
             while ((pointMatch = pointRegex.exec(periodXml)) !== null) {
-                const timestamp = new Date(startTime.getTime() + (parseInt(pointMatch[1]) - 1) * resMin * 60000);
-                const parsedPrice = parseFloat(pointMatch[2]);
-                
-                if (!isNaN(timestamp.getTime()) && !isNaN(parsedPrice)) {
-                    newPrices.push({ time: timestamp.toISOString(), price: parsedPrice });
-                }
+                extractedPoints.push({
+                    pos: parseInt(pointMatch[1]),
+                    val: parseFloat(pointMatch[2])
+                });
             }
+            
+            if (extractedPoints.length === 0) continue;
+
+            // V6.3 BUGFIX: Dynamic Resolution Calculation
+            // Instead of trusting the TSO's <resolution> tag, we calculate the exact time-step 
+            // by dividing the total period duration by the number of data points provided.
+            const totalDurationMs = periodEndTime.getTime() - periodStartTime.getTime();
+            
+            // Protect against divide-by-zero or malformed single-point periods
+            const expectedPoints = extractedPoints.length;
+            const stepMs = totalDurationMs / expectedPoints; 
+            const calcResMin = Math.round(stepMs / 60000);
+            
+            if (calcResMin === 15) globalResMin = 15; // Upgrade global resolution if 15m is detected
+            
+            // If the calculated resolution is weird (not 60, 30, or 15), skip this corrupt block
+            if (![60, 30, 15].includes(calcResMin)) continue;
+
+            // Map the points to exact timestamps
+            extractedPoints.forEach(pt => {
+                // Position is 1-based, so pos 1 = start time, pos 2 = start time + 1 step, etc.
+                const timestamp = new Date(periodStartTime.getTime() + (pt.pos - 1) * stepMs);
+                if (!isNaN(timestamp.getTime()) && !isNaN(pt.val)) {
+                    newPrices.push({ time: timestamp.toISOString(), price: pt.val });
+                }
+            });
         }
 
         if (newPrices.length > 0) {
@@ -180,6 +214,8 @@ export default {
 
             if (dataChanged || existingPrices.length === 0) {
                 const pruneLimit = new Date(Date.now() - 48 * 3600 * 1000).toISOString();
+                
+                // Sort the map into a final sequential array
                 const sortedPrices = Array.from(priceMap, ([time, price]) => ({ time, price }))
                     .filter(item => item.time >= pruneLimit)
                     .sort((a, b) => new Date(a.time) - new Date(b.time));
@@ -193,7 +229,7 @@ export default {
                     license: LICENSE_TEXT,
                     updated: now,
                     points: sortedPrices.length,
-                    res: `${targetResMin}m`,
+                    res: `${globalResMin}m`,
                     data: sortedPrices
                 };
 
@@ -204,7 +240,7 @@ export default {
                         name: zoneName,
                         count: sortedPrices.length.toString(),
                         currency,
-                        res: targetResMin.toString(),
+                        res: globalResMin.toString(),
                         latest: latestTime
                     }
                 });
@@ -257,24 +293,18 @@ export default {
             if (meta.latest) {
                 const tz = getZoneTZ(eic);
                 
-                // 1. Establish the current synthetic local date (ignoring time)
                 const syntheticNow = getSyntheticLocalTime(nowUTC, tz);
                 const currentLocalYear = syntheticNow.getUTCFullYear();
                 const currentLocalMonth = syntheticNow.getUTCMonth();
                 const currentLocalDay = syntheticNow.getUTCDate();
                 
-                // 2. Define exactly what "Today" and "Tomorrow" mean in local calendar terms
-                // Midnight Tonight (end of current local day)
                 const currentDayMidnight = new Date(Date.UTC(currentLocalYear, currentLocalMonth, currentLocalDay + 1)).getTime();
-                // Midnight Tomorrow Night (end of next local day)
                 const nextDayMidnight = new Date(Date.UTC(currentLocalYear, currentLocalMonth, currentLocalDay + 2)).getTime();
                 
-                // 3. Translate the latest available data point into synthetic local time
                 const resMinutes = parseInt(meta.res || "60");
                 const endTimeUTC = new Date(new Date(meta.latest).getTime() + resMinutes * 60000);
                 const syntheticEnd = getSyntheticLocalTime(endTimeUTC, tz).getTime();
                 
-                // 4. Validate if the available data strictly reaches or exceeds the local midnights
                 isCompleteToday = syntheticEnd >= currentDayMidnight;
                 isCompleteTomorrow = syntheticEnd >= nextDayMidnight;
             }
@@ -302,7 +332,7 @@ export default {
     const ratioTomorrow = zones.length > 0 ? (zones.filter(z => z.is_complete_tomorrow).length / zones.length) : 0;
 
     const statusPayload = { 
-        bridge: "PBTH Energy Bridge Pro (v6.2 R2 Edition)", 
+        bridge: "PBTH Energy Bridge Pro (v6.3 R2 Edition)", 
         license: LICENSE_TEXT,
         summary: { 
             total_zones: zones.length, 
