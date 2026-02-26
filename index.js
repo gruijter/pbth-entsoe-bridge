@@ -5,7 +5,7 @@
 	Copyright 2026, Gruijter.org / Robin de Gruijter <gruijter@hotmail.com> */
 
 /**
- * Power by the Hour - v6.7 R2 Edition
+ * Power by the Hour - v6.8 R2 Edition
  *
  * API ENDPOINTS:
  * https://entsoe.gruijter.org                          -> POST endpoint for ENTSO-E Webservice
@@ -14,17 +14,15 @@
  * https://entsoe-prices.gruijter.org/[EIC_CODE].json   -> Get specific zone prices
  */
 
-
 /**
- * Power by the Hour - ENTSO-E Energy Bridge (v6.7 R2 Edition - Future Pruner)
+ * Power by the Hour - ENTSO-E Energy Bridge (v6.8 R2 Edition - Regex EOL Patch)
  *
- * CRITICAL FIXES IN V6.7:
- * 1. Future Pruning: Added a strict upper boundary for data retention. Any data points 
- * extending beyond 48 hours into the future (which indicates malformed TSO push data 
- * or legacy corruption) are now actively pruned. This prevents the status endpoint from 
- * being hijacked by phantom future dates.
- * 2. Force Write: Always saves merged valid data to advance the cache.
- * 3. Dynamic MTU: Correctly handles transitioning 15m/60m resolutions.
+ * CRITICAL FIXES IN V6.8:
+ * 1. Dropped End-Of-List Point: Fixed an issue where the final 15-minute interval (e.g. 22:45) 
+ * was consistently dropped for Nordics/DE-LU. The `<Point>` regex was overly strict and failed 
+ * to match the closing `</Point>` tag on the final node if the TSO formatted the XML abruptly. 
+ * The regex now strictly captures `<position>` and `price.amount` sequentially without requiring 
+ * the closing node wrapper.
  */
 
 const ZONE_NAMES = {
@@ -119,7 +117,7 @@ export default {
         if (zone) {
             return Response.redirect(`${PUBLIC_R2_URL}/${zone}.json`, 301);
         }
-        return new Response("PBTH Energy Bridge v6.7 (R2 Edition) Online. Please use the public URL: " + PUBLIC_R2_URL, { status: 200 });
+        return new Response("PBTH Energy Bridge v6.8 (R2 Edition) Online. Please use the public URL: " + PUBLIC_R2_URL, { status: 200 });
     }
 
     return new Response("Method not allowed", { status: 405 });
@@ -153,7 +151,9 @@ export default {
             
             if (isNaN(periodStartTime.getTime()) || isNaN(periodEndTime.getTime())) continue;
 
-            const pointRegex = /<[^>]*Point(?:[\s\S]*?)?>[\s\S]*?<[^>]*position(?:[\s\S]*?)?>(\d+)<\/[^>]*position>[\s\S]*?<[^>]*price\.amount(?:[\s\S]*?)?>([-\d.]+)<\/[^>]*price\.amount>[\s\S]*?<\/[^>]*Point>/ig;
+            // V6.8 BUGFIX: Lean point extraction. 
+            // Avoids </Point> dependency, capturing position and price blindly to prevent EOL drop.
+            const pointRegex = /<[^>]*position(?:[\s\S]*?)?>(\d+)<\/[^>]*position>[\s\S]*?<[^>]*price\.amount(?:[\s\S]*?)?>([-\d.]+)<\/[^>]*price\.amount>/ig;
             let pointMatch;
             const tempPoints = [];
             
@@ -217,10 +217,9 @@ export default {
                 }
             });
 
-            // V6.7 BUGFIX: Bi-directional Pruning (Past & Future)
             const nowMs = Date.now();
             const pruneLimitPastMs = nowMs - 48 * 3600 * 1000;
-            const pruneLimitFutureMs = nowMs + 48 * 3600 * 1000; // Cap future data at +48 hours
+            const pruneLimitFutureMs = nowMs + 48 * 3600 * 1000; 
             
             const pruneLimitPastISO = new Date(pruneLimitPastMs).toISOString();
             const pruneLimitFutureISO = new Date(pruneLimitFutureMs).toISOString();
@@ -340,7 +339,7 @@ export default {
     const ratioTomorrow = zones.length > 0 ? (zones.filter(z => z.is_complete_tomorrow).length / zones.length) : 0;
 
     const statusPayload = { 
-        bridge: "PBTH Energy Bridge Pro (v6.7 R2 Edition)", 
+        bridge: "PBTH Energy Bridge Pro (v6.8 R2 Edition)", 
         license: LICENSE_TEXT,
         summary: { 
             total_zones: zones.length, 
@@ -357,4 +356,5 @@ export default {
     });
   }
 };
+
 
