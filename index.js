@@ -5,7 +5,7 @@
 	Copyright 2026, Gruijter.org / Robin de Gruijter <gruijter@hotmail.com> */
 
 /**
- * Power by the Hour - v6.4 R2 Edition - Dynamic MTU Parser
+ * Power by the Hour - v6.5 R2 Edition
  *
  * API ENDPOINTS:
  * https://entsoe.gruijter.org                          -> POST endpoint for ENTSO-E Webservice
@@ -13,6 +13,7 @@
  * https://entsoe-prices.gruijter.org/status.json       -> Get bridge health & available zones
  * https://entsoe-prices.gruijter.org/[EIC_CODE].json   -> Get specific zone prices
  */
+
 
 const ZONE_NAMES = {
   // --- West & North Europe ---
@@ -55,6 +56,9 @@ const getTagValue = (xml, tagName) => {
   const match = xml.match(regex);
   return match ? match[2].trim() : null;
 };
+
+// V6.5 Fix: Stabilize floating point comparisons
+const roundPrice = (p) => Math.round(p * 1000) / 1000;
 
 export default {
   async fetch(request, env, ctx) {
@@ -104,7 +108,7 @@ export default {
         if (zone) {
             return Response.redirect(`${PUBLIC_R2_URL}/${zone}.json`, 301);
         }
-        return new Response("PBTH Energy Bridge v6.4 (R2 Edition) Online. Please use the public URL: " + PUBLIC_R2_URL, { status: 200 });
+        return new Response("PBTH Energy Bridge v6.5 (R2 Edition) Online. Please use the public URL: " + PUBLIC_R2_URL, { status: 200 });
     }
 
     return new Response("Method not allowed", { status: 405 });
@@ -122,7 +126,7 @@ export default {
         const periodRegex = /<[^>]*Period(?:\s[^>]*)?>([\s\S]*?)<\/[^>]*Period>/ig;
         let periodMatch;
         
-        let targetResMin = 60; // Baseline resolution
+        let targetResMin = 60; 
         const extractedBlocks = [];
         
         while ((periodMatch = periodRegex.exec(xmlData)) !== null) {
@@ -145,7 +149,7 @@ export default {
             while ((pointMatch = pointRegex.exec(periodXml)) !== null) {
                 tempPoints.push({
                     pos: parseInt(pointMatch[1]),
-                    val: parseFloat(pointMatch[2])
+                    val: roundPrice(parseFloat(pointMatch[2]))
                 });
             }
             
@@ -159,7 +163,7 @@ export default {
             if (![60, 30, 15].includes(calcResMin)) continue;
             
             if (calcResMin < targetResMin) {
-                targetResMin = calcResMin; // Lowest step size defines overall resolution
+                targetResMin = calcResMin; 
             }
 
             tempPoints.forEach(pt => {
@@ -180,7 +184,6 @@ export default {
                     const existingData = await existingObj.json();
                     existingPrices = existingData.data || [];
                     
-                    // Respect the highest resolution already established in R2
                     const existingResMatch = existingData.res ? parseInt(existingData.res) : 60;
                     if (existingResMatch < targetResMin) targetResMin = existingResMatch;
                     
@@ -188,13 +191,9 @@ export default {
             }
             
             let dataChanged = false;
-            const priceMap = new Map(existingPrices.map(obj => [obj.time, obj.price]));
+            const priceMap = new Map(existingPrices.map(obj => [obj.time, roundPrice(obj.price)]));
             
-            // Integrate new blocks. If multiple resolutions target the same hour, 
-            // the system organically handles it by accepting the value.
             extractedBlocks.forEach(item => {
-                // If the block is 60m but target is 15m, extrapolate the 60m point to 4x 15m intervals
-                // This ensures "consecutive order" for PbtH when mixed data is sent
                 const periodsToFill = item.res / targetResMin;
                 const baseTime = new Date(item.time).getTime();
                 
@@ -207,11 +206,21 @@ export default {
                 }
             });
 
-            if (dataChanged || existingPrices.length === 0) {
-                const pruneLimit = new Date(Date.now() - 48 * 3600 * 1000).toISOString();
+            // V6.5 BUGFIX: Aggressive data recovery check.
+            // Even if the price diff doesn't register (due to historical overlap), 
+            // force a save if the new data extends the timeline or fixes point gaps.
+            const pruneLimitMs = Date.now() - 48 * 3600 * 1000;
+            const validOldPointsCount = existingPrices.filter(p => new Date(p.time).getTime() >= pruneLimitMs).length;
+            
+            const currentLatestTime = priceMap.size > 0 ? Array.from(priceMap.keys()).sort().pop() : null;
+            const oldLatestTime = existingPrices.length > 0 ? existingPrices[existingPrices.length - 1].time : null;
+
+            if (dataChanged || existingPrices.length === 0 || priceMap.size > validOldPointsCount || (currentLatestTime && oldLatestTime && new Date(currentLatestTime) > new Date(oldLatestTime))) {
+                
+                const pruneLimitISO = new Date(pruneLimitMs).toISOString();
                 
                 const sortedPrices = Array.from(priceMap, ([time, price]) => ({ time, price }))
-                    .filter(item => item.time >= pruneLimit)
+                    .filter(item => item.time >= pruneLimitISO)
                     .sort((a, b) => new Date(a.time) - new Date(b.time));
 
                 const now = new Date().toISOString();
@@ -326,7 +335,7 @@ export default {
     const ratioTomorrow = zones.length > 0 ? (zones.filter(z => z.is_complete_tomorrow).length / zones.length) : 0;
 
     const statusPayload = { 
-        bridge: "PBTH Energy Bridge Pro (v6.4 R2 Edition)", 
+        bridge: "PBTH Energy Bridge Pro (v6.5 R2 Edition)", 
         license: LICENSE_TEXT,
         summary: { 
             total_zones: zones.length, 
