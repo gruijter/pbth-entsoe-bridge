@@ -5,7 +5,7 @@
 	Copyright 2026, Gruijter.org / Robin de Gruijter <gruijter@hotmail.com> */
 
 /**
- * Power by the Hour - v6.5 R2 Edition
+ * Power by the Hour - v6.7 R2 Edition
  *
  * API ENDPOINTS:
  * https://entsoe.gruijter.org                          -> POST endpoint for ENTSO-E Webservice
@@ -14,6 +14,18 @@
  * https://entsoe-prices.gruijter.org/[EIC_CODE].json   -> Get specific zone prices
  */
 
+
+/**
+ * Power by the Hour - ENTSO-E Energy Bridge (v6.7 R2 Edition - Future Pruner)
+ *
+ * CRITICAL FIXES IN V6.7:
+ * 1. Future Pruning: Added a strict upper boundary for data retention. Any data points 
+ * extending beyond 48 hours into the future (which indicates malformed TSO push data 
+ * or legacy corruption) are now actively pruned. This prevents the status endpoint from 
+ * being hijacked by phantom future dates.
+ * 2. Force Write: Always saves merged valid data to advance the cache.
+ * 3. Dynamic MTU: Correctly handles transitioning 15m/60m resolutions.
+ */
 
 const ZONE_NAMES = {
   // --- West & North Europe ---
@@ -57,7 +69,6 @@ const getTagValue = (xml, tagName) => {
   return match ? match[2].trim() : null;
 };
 
-// V6.5 Fix: Stabilize floating point comparisons
 const roundPrice = (p) => Math.round(p * 1000) / 1000;
 
 export default {
@@ -108,7 +119,7 @@ export default {
         if (zone) {
             return Response.redirect(`${PUBLIC_R2_URL}/${zone}.json`, 301);
         }
-        return new Response("PBTH Energy Bridge v6.5 (R2 Edition) Online. Please use the public URL: " + PUBLIC_R2_URL, { status: 200 });
+        return new Response("PBTH Energy Bridge v6.7 (R2 Edition) Online. Please use the public URL: " + PUBLIC_R2_URL, { status: 200 });
     }
 
     return new Response("Method not allowed", { status: 405 });
@@ -157,10 +168,14 @@ export default {
 
             const totalDurationMs = periodEndTime.getTime() - periodStartTime.getTime();
             const expectedPoints = tempPoints.length;
-            const stepMs = totalDurationMs / expectedPoints; 
-            const calcResMin = Math.round(stepMs / 60000);
+            let stepMs = totalDurationMs / expectedPoints; 
+            let calcResMin = Math.round(stepMs / 60000);
             
-            if (![60, 30, 15].includes(calcResMin)) continue;
+            if (![60, 30, 15].includes(calcResMin)) {
+                const resolutionRaw = getTagValue(periodXml, "resolution") || "PT60M";
+                calcResMin = resolutionRaw.includes("PT15M") ? 15 : 60;
+                stepMs = calcResMin * 60000;
+            }
             
             if (calcResMin < targetResMin) {
                 targetResMin = calcResMin; 
@@ -190,7 +205,6 @@ export default {
                 } catch(e) {}
             }
             
-            let dataChanged = false;
             const priceMap = new Map(existingPrices.map(obj => [obj.time, roundPrice(obj.price)]));
             
             extractedBlocks.forEach(item => {
@@ -199,57 +213,48 @@ export default {
                 
                 for (let i = 0; i < periodsToFill; i++) {
                     const currentFillTime = new Date(baseTime + i * targetResMin * 60000).toISOString();
-                    if (!priceMap.has(currentFillTime) || priceMap.get(currentFillTime) !== item.price) {
-                        priceMap.set(currentFillTime, item.price);
-                        dataChanged = true;
-                    }
+                    priceMap.set(currentFillTime, item.price);
                 }
             });
 
-            // V6.5 BUGFIX: Aggressive data recovery check.
-            // Even if the price diff doesn't register (due to historical overlap), 
-            // force a save if the new data extends the timeline or fixes point gaps.
-            const pruneLimitMs = Date.now() - 48 * 3600 * 1000;
-            const validOldPointsCount = existingPrices.filter(p => new Date(p.time).getTime() >= pruneLimitMs).length;
+            // V6.7 BUGFIX: Bi-directional Pruning (Past & Future)
+            const nowMs = Date.now();
+            const pruneLimitPastMs = nowMs - 48 * 3600 * 1000;
+            const pruneLimitFutureMs = nowMs + 48 * 3600 * 1000; // Cap future data at +48 hours
             
-            const currentLatestTime = priceMap.size > 0 ? Array.from(priceMap.keys()).sort().pop() : null;
-            const oldLatestTime = existingPrices.length > 0 ? existingPrices[existingPrices.length - 1].time : null;
+            const pruneLimitPastISO = new Date(pruneLimitPastMs).toISOString();
+            const pruneLimitFutureISO = new Date(pruneLimitFutureMs).toISOString();
+            
+            const sortedPrices = Array.from(priceMap, ([time, price]) => ({ time, price }))
+                .filter(item => item.time >= pruneLimitPastISO && item.time <= pruneLimitFutureISO)
+                .sort((a, b) => new Date(a.time) - new Date(b.time));
 
-            if (dataChanged || existingPrices.length === 0 || priceMap.size > validOldPointsCount || (currentLatestTime && oldLatestTime && new Date(currentLatestTime) > new Date(oldLatestTime))) {
-                
-                const pruneLimitISO = new Date(pruneLimitMs).toISOString();
-                
-                const sortedPrices = Array.from(priceMap, ([time, price]) => ({ time, price }))
-                    .filter(item => item.time >= pruneLimitISO)
-                    .sort((a, b) => new Date(a.time) - new Date(b.time));
+            const now = new Date().toISOString();
+            const latestTime = sortedPrices.length > 0 ? sortedPrices[sortedPrices.length - 1].time : now;
 
-                const now = new Date().toISOString();
-                const latestTime = sortedPrices.length > 0 ? sortedPrices[sortedPrices.length - 1].time : now;
+            const zoneJsonPayload = {
+                zone: zoneEic,
+                name: zoneName,
+                license: LICENSE_TEXT,
+                updated: now,
+                points: sortedPrices.length,
+                res: `${targetResMin}m`,
+                data: sortedPrices
+            };
 
-                const zoneJsonPayload = {
-                    zone: zoneEic,
-                    name: zoneName,
-                    license: LICENSE_TEXT,
+            await env.ENTSOE_PRICES_R2_BUCKET.put(fileName, JSON.stringify(zoneJsonPayload), {
+                httpMetadata: { contentType: "application/json", cacheControl: "public, max-age=300" },
+                customMetadata: {
                     updated: now,
-                    points: sortedPrices.length,
-                    res: `${targetResMin}m`,
-                    data: sortedPrices
-                };
+                    name: zoneName,
+                    count: sortedPrices.length.toString(),
+                    currency,
+                    res: targetResMin.toString(),
+                    latest: latestTime
+                }
+            });
 
-                await env.ENTSOE_PRICES_R2_BUCKET.put(fileName, JSON.stringify(zoneJsonPayload), {
-                    httpMetadata: { contentType: "application/json", cacheControl: "public, max-age=300" },
-                    customMetadata: {
-                        updated: now,
-                        name: zoneName,
-                        count: sortedPrices.length.toString(),
-                        currency,
-                        res: targetResMin.toString(),
-                        latest: latestTime
-                    }
-                });
-
-                await this.updateStatusFile(env, now);
-            }
+            await this.updateStatusFile(env, now);
         }
     } catch (e) { console.error("Data processing error:", e); }
   },
@@ -335,7 +340,7 @@ export default {
     const ratioTomorrow = zones.length > 0 ? (zones.filter(z => z.is_complete_tomorrow).length / zones.length) : 0;
 
     const statusPayload = { 
-        bridge: "PBTH Energy Bridge Pro (v6.5 R2 Edition)", 
+        bridge: "PBTH Energy Bridge Pro (v6.7 R2 Edition)", 
         license: LICENSE_TEXT,
         summary: { 
             total_zones: zones.length, 
@@ -352,3 +357,4 @@ export default {
     });
   }
 };
+
