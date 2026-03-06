@@ -5,7 +5,7 @@
 	Copyright 2026, Gruijter.org / Robin de Gruijter <gruijter@hotmail.com> */
 
 /**
- * Power by the Hour - v6.8 R2 Edition
+ * Power by the Hour - v7.0 R2 Edition
  *
  * API ENDPOINTS:
  * https://entsoe.gruijter.org                          -> POST endpoint for ENTSO-E Webservice
@@ -15,24 +15,18 @@
  */
 
 /**
- * Power by the Hour - ENTSO-E Energy Bridge (v6.8 R2 Edition - Regex EOL Patch)
+ * Power by the Hour - ENTSO-E Energy Bridge (v7.0 R2 Edition - Diagnostic Mode)
  *
- * CRITICAL FIXES IN V6.8:
- * 1. Dropped End-Of-List Point: Fixed an issue where the final 15-minute interval (e.g. 22:45) 
- * was consistently dropped for Nordics/DE-LU. The `<Point>` regex was overly strict and failed 
- * to match the closing `</Point>` tag on the final node if the TSO formatted the XML abruptly. 
- * The regex now strictly captures `<position>` and `price.amount` sequentially without requiring 
- * the closing node wrapper.
+ * This version introduces raw XML logging to permanently identify the parsing issue
+ * for the final 15-minute intervals. Every incoming POST request will dump its raw
+ * XML payload directly into the R2 bucket prefixed with 'debug_'.
  */
 
 const ZONE_NAMES = {
-  // --- West & North Europe ---
   "10YNL----------L": "Netherlands", "10YBE----------2": "Belgium", "10YFR-RTE------C": "France",
   "10Y1001A1001A82H": "Germany-Luxembourg", "10Y1001A1001A59C": "Germany (Amprion Area)",
   "10YAT-APG------L": "Austria", "10YCH-SWISSGRIDZ": "Switzerland",
   "10Y1001A1001A92E": "United Kingdom", "10Y1001A1001A016": "Ireland (SEM)",
-
-  // --- Scandinavia & Baltics ---
   "10YDK-1--------W": "Denmark DK1", "10YDK-2--------M": "Denmark DK2", "10YFI-1--------U": "Finland",
   "10YNO-1--------2": "Norway NO1 (Oslo)", "10YNO-2--------T": "Norway NO2 (Kristiansand)",
   "10YNO-3--------J": "Norway NO3 (Trondheim)", "10YNO-4--------9": "Norway NO4 (Tromsø)",
@@ -41,15 +35,11 @@ const ZONE_NAMES = {
   "10Y1001A1001A44P": "Sweden SE1", "10Y1001A1001A45N": "Sweden SE2", 
   "10Y1001A1001A46L": "Sweden SE3", "10Y1001A1001A47J": "Sweden SE4",
   "10Y1001A1001A39I": "Estonia", "10YLV-1001A00074": "Latvia", "10YLT-1001A0008Q": "Lithuania",
-
-  // --- South Europe ---
   "10YES-REE------0": "Spain", "10YPT-REN------W": "Portugal", "10YGR-HTSO-----Y": "Greece",
   "10YIT-GRTN-----B": "Italy (National)", "10Y1001A1001A73I": "Italy North",
   "10Y1001A1001A70O": "Italy Centre-North", "10Y1001A1001A71M": "Italy Centre-South",
   "10Y1001A1001A74G": "Italy South", "10Y1001A1001A75E": "Italy Sicily",
   "10Y1001A1001A885": "Italy Sardinia", "10Y1001A1001A893": "Italy Rossano",
-
-  // --- Central & East Europe ---
   "10YPL-AREA-----S": "Poland", "10YCZ-CEPS-----N": "Czech Republic", "10YSK-SEPS-----K": "Slovakia",
   "10YHU-MAVIR----U": "Hungary", "10YRO-TEL------P": "Romania", "10YSI-ELES-----O": "Slovenia",
   "10YHR-HEP------M": "Croatia", "10YCA-BULGARIA-R": "Bulgaria", "10YCS-CG-TSO---S": "Montenegro",
@@ -77,10 +67,18 @@ export default {
     if (request.method === "POST") {
       try {
         const xmlData = await request.text();
+        
+        // --- DIAGNOSTIC RAW XML LOGGING ---
         if (xmlData.length > 50) {
-          ctx.waitUntil(this.processData(xmlData, env));
+            const tempEic = getTagValue(xmlData, "out_Domain.mRID");
+            if (tempEic) {
+                await env.ENTSOE_PRICES_R2_BUCKET.put(`debug_${tempEic}.xml`, xmlData, {
+                    httpMetadata: { contentType: "application/xml", cacheControl: "no-cache" }
+                });
+            }
+            ctx.waitUntil(this.processData(xmlData, env));
         } else {
-          ctx.waitUntil(this.updateStatusFile(env, new Date().toISOString()));
+            ctx.waitUntil(this.updateStatusFile(env, new Date().toISOString()));
         }
 
         const responseXml = `<?xml version="1.0" encoding="UTF-8"?>
@@ -117,7 +115,7 @@ export default {
         if (zone) {
             return Response.redirect(`${PUBLIC_R2_URL}/${zone}.json`, 301);
         }
-        return new Response("PBTH Energy Bridge v6.8 (R2 Edition) Online. Please use the public URL: " + PUBLIC_R2_URL, { status: 200 });
+        return new Response("PBTH Energy Bridge v7.0 (Diagnostic Edition) Online. Please use the public URL: " + PUBLIC_R2_URL, { status: 200 });
     }
 
     return new Response("Method not allowed", { status: 405 });
@@ -145,48 +143,28 @@ export default {
             if (!timeIntervalMatch) continue;
             
             const startStr = timeIntervalMatch[1].trim();
-            const endStr = timeIntervalMatch[2].trim();
             const periodStartTime = new Date(startStr);
-            const periodEndTime = new Date(endStr);
-            
-            if (isNaN(periodStartTime.getTime()) || isNaN(periodEndTime.getTime())) continue;
+            if (isNaN(periodStartTime.getTime())) continue;
 
-            // V6.8 BUGFIX: Lean point extraction. 
-            // Avoids </Point> dependency, capturing position and price blindly to prevent EOL drop.
+            // Strict parsing according to ENTSO-E standard
+            const resolutionRaw = getTagValue(periodXml, "resolution") || "PT60M";
+            let calcResMin = resolutionRaw.includes("PT15M") ? 15 : (resolutionRaw.includes("PT30M") ? 30 : 60);
+            
+            if (calcResMin < targetResMin) targetResMin = calcResMin; 
+
             const pointRegex = /<[^>]*position(?:[\s\S]*?)?>(\d+)<\/[^>]*position>[\s\S]*?<[^>]*price\.amount(?:[\s\S]*?)?>([-\d.]+)<\/[^>]*price\.amount>/ig;
             let pointMatch;
-            const tempPoints = [];
             
             while ((pointMatch = pointRegex.exec(periodXml)) !== null) {
-                tempPoints.push({
-                    pos: parseInt(pointMatch[1]),
-                    val: roundPrice(parseFloat(pointMatch[2]))
-                });
-            }
-            
-            if (tempPoints.length === 0) continue;
-
-            const totalDurationMs = periodEndTime.getTime() - periodStartTime.getTime();
-            const expectedPoints = tempPoints.length;
-            let stepMs = totalDurationMs / expectedPoints; 
-            let calcResMin = Math.round(stepMs / 60000);
-            
-            if (![60, 30, 15].includes(calcResMin)) {
-                const resolutionRaw = getTagValue(periodXml, "resolution") || "PT60M";
-                calcResMin = resolutionRaw.includes("PT15M") ? 15 : 60;
-                stepMs = calcResMin * 60000;
-            }
-            
-            if (calcResMin < targetResMin) {
-                targetResMin = calcResMin; 
-            }
-
-            tempPoints.forEach(pt => {
-                const timestamp = new Date(periodStartTime.getTime() + (pt.pos - 1) * stepMs);
-                if (!isNaN(timestamp.getTime()) && !isNaN(pt.val)) {
-                    extractedBlocks.push({ time: timestamp.toISOString(), price: pt.val, res: calcResMin });
+                const pos = parseInt(pointMatch[1]);
+                const val = roundPrice(parseFloat(pointMatch[2]));
+                
+                if (!isNaN(pos) && !isNaN(val)) {
+                    // Position is 1-based index (e.g., position 1 is startTime + 0)
+                    const timestamp = new Date(periodStartTime.getTime() + (pos - 1) * calcResMin * 60000);
+                    extractedBlocks.push({ time: timestamp.toISOString(), price: val, res: calcResMin });
                 }
-            });
+            }
         }
 
         if (extractedBlocks.length > 0) {
@@ -198,10 +176,8 @@ export default {
                 try {
                     const existingData = await existingObj.json();
                     existingPrices = existingData.data || [];
-                    
                     const existingResMatch = existingData.res ? parseInt(existingData.res) : 60;
                     if (existingResMatch < targetResMin) targetResMin = existingResMatch;
-                    
                 } catch(e) {}
             }
             
@@ -290,7 +266,7 @@ export default {
     const listed = await env.ENTSOE_PRICES_R2_BUCKET.list({ include: ['customMetadata'] });
     
     let zones = listed.objects
-        .filter(k => k.key !== 'status.json' && k.key.endsWith('.json'))
+        .filter(k => k.key !== 'status.json' && !k.key.startsWith('debug_') && k.key.endsWith('.json'))
         .map(k => {
             const meta = k.customMetadata || {};
             const eic = k.key.replace('.json', '');
@@ -339,7 +315,7 @@ export default {
     const ratioTomorrow = zones.length > 0 ? (zones.filter(z => z.is_complete_tomorrow).length / zones.length) : 0;
 
     const statusPayload = { 
-        bridge: "PBTH Energy Bridge Pro (v6.8 R2 Edition)", 
+        bridge: "PBTH Energy Bridge Pro (v7.0 R2 Edition - Diagnostic)", 
         license: LICENSE_TEXT,
         summary: { 
             total_zones: zones.length, 
@@ -356,5 +332,3 @@ export default {
     });
   }
 };
-
-
