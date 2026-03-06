@@ -13,14 +13,15 @@
  */
 
 /**
- * Power by the Hour - ENTSO-E Energy Bridge (v7.4 R2 Edition - Gap Filler + Debug)
+ * Power by the Hour - ENTSO-E Energy Bridge (v8.1 R2 Edition - A03 Curve Compliance)
  *
- * CRITICAL FIXES IN V7.4:
- * 1. Restored Diagnostic Logger: Inbound XML payloads are once again securely saved to R2
- * as `debug_[EIC].xml` for future troubleshooting and format analysis.
- * 2. Retains V7.3 Gap Filler: Automatically detects and synthesizes omitted `<Point>` nodes 
- * where TSOs drop sequential data points with identical prices.
- * 3. Retains Pure UTC validation for status completion.
+ * CRITICAL FIXES IN V8.1:
+ * 1. A03 Curve Restored: Re-implemented the position padder strictly to comply with 
+ * ENTSO-E's A03 (Step Curve) methodology. If TSOs omit <Point> nodes (mid-period or 
+ * end-of-period), the bridge correctly carries over the previous price. 
+ * 2. No Resolution Mixing: 60m data stays 60m data. 15m data stays 15m data. 
+ * Padding only occurs within the explicit <resolution> interval provided in the XML.
+ * 3. Diagnostic logging to `debug_[EIC].xml` is retained.
  */
 
 const ZONE_NAMES = {
@@ -70,7 +71,7 @@ export default {
         const xmlData = await request.text();
         
         if (xmlData.length > 50) {
-            // V7.4 RESTORED: Diagnostic Debug Logging
+            // Diagnostic Logging: Store raw XML
             const tempEic = getTagValue(xmlData, "out_Domain.mRID");
             if (tempEic) {
                 ctx.waitUntil(
@@ -79,7 +80,6 @@ export default {
                     })
                 );
             }
-            
             ctx.waitUntil(this.processData(xmlData, env));
         } else {
             ctx.waitUntil(this.updateStatusFile(env, new Date().toISOString()));
@@ -119,7 +119,7 @@ export default {
         if (zone) {
             return Response.redirect(`${PUBLIC_R2_URL}/${zone}.json`, 301);
         }
-        return new Response("PBTH Energy Bridge v7.4 (Gap Filler + Debug) Online. Please use the public URL: " + PUBLIC_R2_URL, { status: 200 });
+        return new Response("PBTH Energy Bridge v8.1 (A03 Compliance) Online. Please use the public URL: " + PUBLIC_R2_URL, { status: 200 });
     }
 
     return new Response("Method not allowed", { status: 405 });
@@ -137,7 +137,7 @@ export default {
         const periodRegex = /<[^>]*Period(?:\s[^>]*)?>([\s\S]*?)<\/[^>]*Period>/ig;
         let periodMatch;
         
-        let globalResMin = 60; 
+        let fileDominantResMin = 60; 
         const extractedBlocks = [];
         
         while ((periodMatch = periodRegex.exec(xmlData)) !== null) {
@@ -147,13 +147,19 @@ export default {
             if (!timeIntervalMatch) continue;
             
             const startStr = timeIntervalMatch[1].trim();
+            const endStr = timeIntervalMatch[2].trim();
             const periodStartTime = new Date(startStr);
-            if (isNaN(periodStartTime.getTime())) continue;
+            const periodEndTime = new Date(endStr);
+            if (isNaN(periodStartTime.getTime()) || isNaN(periodEndTime.getTime())) continue;
 
             const resolutionRaw = getTagValue(periodXml, "resolution") || "PT60M";
             let calcResMin = resolutionRaw.includes("PT15M") ? 15 : (resolutionRaw.includes("PT30M") ? 30 : 60);
             
-            if (calcResMin < globalResMin) globalResMin = calcResMin; 
+            if (calcResMin < fileDominantResMin) fileDominantResMin = calcResMin; 
+
+            // Calculate expected points for A03 curve padding
+            const totalDurationMs = periodEndTime.getTime() - periodStartTime.getTime();
+            const expectedPoints = Math.round(totalDurationMs / (calcResMin * 60000));
 
             const pointRegex = /<[^>]*position(?:[\s\S]*?)?>(\d+)<\/[^>]*position>[\s\S]*?<[^>]*price\.amount(?:[\s\S]*?)?>([-\d.]+)<\/[^>]*price\.amount>/ig;
             let pointMatch;
@@ -167,20 +173,28 @@ export default {
                 
                 if (!isNaN(currentPos) && !isNaN(currentVal)) {
                     
-                    // Detect and Fill Omitted Intervals (Gap Filler)
+                    // A03 Curve Compliance: Fill omitted mid-period nodes
                     if (lastPos > 0 && currentPos > (lastPos + 1)) {
                         for (let missingPos = lastPos + 1; missingPos < currentPos; missingPos++) {
                             const fillTimestampMs = periodStartTime.getTime() + (missingPos - 1) * calcResMin * 60000;
-                            extractedBlocks.push({ time: new Date(fillTimestampMs).toISOString(), price: lastVal, res: calcResMin });
+                            extractedBlocks.push({ time: new Date(fillTimestampMs).toISOString(), price: lastVal });
                         }
                     }
                     
-                    // Add the current explicitly provided point
+                    // Add explicit node
                     const timestampMs = periodStartTime.getTime() + (currentPos - 1) * calcResMin * 60000;
-                    extractedBlocks.push({ time: new Date(timestampMs).toISOString(), price: currentVal, res: calcResMin });
+                    extractedBlocks.push({ time: new Date(timestampMs).toISOString(), price: currentVal });
                     
                     lastPos = currentPos;
                     lastVal = currentVal;
+                }
+            }
+
+            // A03 Curve Compliance: Pad omitted end-of-period nodes
+            if (lastPos > 0 && lastPos < expectedPoints) {
+                for (let missingPos = lastPos + 1; missingPos <= expectedPoints; missingPos++) {
+                    const fillTimestampMs = periodStartTime.getTime() + (missingPos - 1) * calcResMin * 60000;
+                    extractedBlocks.push({ time: new Date(fillTimestampMs).toISOString(), price: lastVal });
                 }
             }
         }
@@ -188,14 +202,14 @@ export default {
         if (extractedBlocks.length > 0) {
             const fileName = `${zoneEic}.json`;
             let existingPrices = [];
+            let r2DominantResMin = 60;
 
             const existingObj = await env.ENTSOE_PRICES_R2_BUCKET.get(fileName);
             if (existingObj) {
                 try {
                     const existingData = await existingObj.json();
                     existingPrices = existingData.data || [];
-                    const existingResMatch = existingData.res ? parseInt(existingData.res) : 60;
-                    if (existingResMatch < globalResMin) globalResMin = existingResMatch;
+                    if (existingData.res) r2DominantResMin = parseInt(existingData.res);
                 } catch(e) {}
             }
             
@@ -204,6 +218,8 @@ export default {
             extractedBlocks.forEach(item => {
                 priceMap.set(item.time, item.price);
             });
+
+            const finalResMin = Math.min(fileDominantResMin, r2DominantResMin);
 
             const nowMs = Date.now();
             const pruneLimitPastMs = nowMs - 48 * 3600 * 1000;
@@ -225,7 +241,7 @@ export default {
                 license: LICENSE_TEXT,
                 updated: now,
                 points: sortedPrices.length,
-                res: `${globalResMin}m`,
+                res: `${finalResMin}m`,
                 data: sortedPrices
             };
 
@@ -236,7 +252,7 @@ export default {
                     name: zoneName,
                     count: sortedPrices.length.toString(),
                     currency,
-                    res: globalResMin.toString(),
+                    res: finalResMin.toString(),
                     latest: latestTime
                 }
             });
@@ -249,7 +265,7 @@ export default {
   async updateStatusFile(env, lastPushTime) {
     const nowUTC = new Date();
     
-    // Status Logic - Pure UTC checks 
+    // Status Logic - Pure UTC
     const currentUTCDay = new Date(Date.UTC(nowUTC.getUTCFullYear(), nowUTC.getUTCMonth(), nowUTC.getUTCDate()));
     const targetTodayUTC = new Date(currentUTCDay.getTime() + 21 * 3600 * 1000).getTime();
     const targetTomorrowUTC = new Date(currentUTCDay.getTime() + 45 * 3600 * 1000).getTime(); 
@@ -293,7 +309,7 @@ export default {
     const ratioTomorrow = zones.length > 0 ? (zones.filter(z => z.is_complete_tomorrow).length / zones.length) : 0;
 
     const statusPayload = { 
-        bridge: "PBTH Energy Bridge Pro (v7.4 Gap Filler + Debug)", 
+        bridge: "PBTH Energy Bridge Pro (v8.1 A03 Restored)", 
         license: LICENSE_TEXT,
         summary: { 
             total_zones: zones.length, 
