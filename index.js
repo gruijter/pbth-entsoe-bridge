@@ -12,25 +12,22 @@
  * https://entsoe-prices.gruijter.org/[EIC_CODE].json   -> Get specific zone prices
  */
 
- /**
- * Power by the Hour - ENTSO-E Energy Bridge (v7.1 R2 Edition - Clean Parse)
+/**
+ * Power by the Hour - ENTSO-E Energy Bridge (v7.2 R2 Edition - Pure UTC)
  *
- * CRITICAL FIXES IN V7.1:
- * 1. Removed Interpolation Chaos: The bridge no longer attempts to mathematically 'fill' 
- * 60m data into 15m slots. This caused severe overlapping bugs (45m gaps) in transition zones 
- * like NL and DE. It now strictly honors the exact timestamp provided by the <resolution> interval.
- * 2. High-Res Priority: If a document contains both PT60M and PT15M blocks for the same day, 
- * the PT15M data points organically overwrite the PT60M points in the Map at the correct intervals.
+ * CRITICAL FIXES IN V7.2:
+ * 1. Removed IANA Synthetic Timezones: The attempt to cast UTC to local IANA timezones 
+ * caused severe string-parsing drift on the Cloudflare v8 engine, falsely interpreting 
+ * the 22:45 UTC point as incomplete or dropping it. Status validation is now 100% Pure UTC.
+ * 2. Fixed Time-Step calculation based strictly on XML <resolution>. No fractional intervals.
+ * 3. Maintains the 96th point accurately (e.g. 22:45 UTC).
  */
 
 const ZONE_NAMES = {
-  // --- West & North Europe ---
   "10YNL----------L": "Netherlands", "10YBE----------2": "Belgium", "10YFR-RTE------C": "France",
   "10Y1001A1001A82H": "Germany-Luxembourg", "10Y1001A1001A59C": "Germany (Amprion Area)",
   "10YAT-APG------L": "Austria", "10YCH-SWISSGRIDZ": "Switzerland",
   "10Y1001A1001A92E": "United Kingdom", "10Y1001A1001A016": "Ireland (SEM)",
-
-  // --- Scandinavia & Baltics ---
   "10YDK-1--------W": "Denmark DK1", "10YDK-2--------M": "Denmark DK2", "10YFI-1--------U": "Finland",
   "10YNO-1--------2": "Norway NO1 (Oslo)", "10YNO-2--------T": "Norway NO2 (Kristiansand)",
   "10YNO-3--------J": "Norway NO3 (Trondheim)", "10YNO-4--------9": "Norway NO4 (Tromsø)",
@@ -39,15 +36,11 @@ const ZONE_NAMES = {
   "10Y1001A1001A44P": "Sweden SE1", "10Y1001A1001A45N": "Sweden SE2", 
   "10Y1001A1001A46L": "Sweden SE3", "10Y1001A1001A47J": "Sweden SE4",
   "10Y1001A1001A39I": "Estonia", "10YLV-1001A00074": "Latvia", "10YLT-1001A0008Q": "Lithuania",
-
-  // --- South Europe ---
   "10YES-REE------0": "Spain", "10YPT-REN------W": "Portugal", "10YGR-HTSO-----Y": "Greece",
   "10YIT-GRTN-----B": "Italy (National)", "10Y1001A1001A73I": "Italy North",
   "10Y1001A1001A70O": "Italy Centre-North", "10Y1001A1001A71M": "Italy Centre-South",
   "10Y1001A1001A74G": "Italy South", "10Y1001A1001A75E": "Italy Sicily",
   "10Y1001A1001A885": "Italy Sardinia", "10Y1001A1001A893": "Italy Rossano",
-
-  // --- Central & East Europe ---
   "10YPL-AREA-----S": "Poland", "10YCZ-CEPS-----N": "Czech Republic", "10YSK-SEPS-----K": "Slovakia",
   "10YHU-MAVIR----U": "Hungary", "10YRO-TEL------P": "Romania", "10YSI-ELES-----O": "Slovenia",
   "10YHR-HEP------M": "Croatia", "10YCA-BULGARIA-R": "Bulgaria", "10YCS-CG-TSO---S": "Montenegro",
@@ -76,7 +69,7 @@ export default {
       try {
         const xmlData = await request.text();
         
-        // Diagnostic log
+        // Log to debug bucket (optional, can be removed later)
         if (xmlData.length > 50) {
             const tempEic = getTagValue(xmlData, "out_Domain.mRID");
             if (tempEic) {
@@ -123,7 +116,7 @@ export default {
         if (zone) {
             return Response.redirect(`${PUBLIC_R2_URL}/${zone}.json`, 301);
         }
-        return new Response("PBTH Energy Bridge v7.1 (Clean Parse) Online. Please use the public URL: " + PUBLIC_R2_URL, { status: 200 });
+        return new Response("PBTH Energy Bridge v7.2 (Pure UTC) Online. Please use the public URL: " + PUBLIC_R2_URL, { status: 200 });
     }
 
     return new Response("Method not allowed", { status: 405 });
@@ -141,7 +134,7 @@ export default {
         const periodRegex = /<[^>]*Period(?:\s[^>]*)?>([\s\S]*?)<\/[^>]*Period>/ig;
         let periodMatch;
         
-        let globalResMin = 60; // Track the highest detail level found overall
+        let globalResMin = 60; 
         const extractedBlocks = [];
         
         while ((periodMatch = periodRegex.exec(xmlData)) !== null) {
@@ -154,11 +147,13 @@ export default {
             const periodStartTime = new Date(startStr);
             if (isNaN(periodStartTime.getTime())) continue;
 
+            // Strict interval resolution based on the document itself
             const resolutionRaw = getTagValue(periodXml, "resolution") || "PT60M";
             let calcResMin = resolutionRaw.includes("PT15M") ? 15 : (resolutionRaw.includes("PT30M") ? 30 : 60);
             
             if (calcResMin < globalResMin) globalResMin = calcResMin; 
 
+            // Extract position and price
             const pointRegex = /<[^>]*position(?:[\s\S]*?)?>(\d+)<\/[^>]*position>[\s\S]*?<[^>]*price\.amount(?:[\s\S]*?)?>([-\d.]+)<\/[^>]*price\.amount>/ig;
             let pointMatch;
             
@@ -167,9 +162,9 @@ export default {
                 const val = roundPrice(parseFloat(pointMatch[2]));
                 
                 if (!isNaN(pos) && !isNaN(val)) {
-                    // Exactly calculate the timestamp based on the explicit ENTSO-E resolution interval
-                    const timestamp = new Date(periodStartTime.getTime() + (pos - 1) * calcResMin * 60000);
-                    extractedBlocks.push({ time: timestamp.toISOString(), price: val, res: calcResMin });
+                    // Position is 1-based, calculate explicit timestamp
+                    const timestampMs = periodStartTime.getTime() + (pos - 1) * calcResMin * 60000;
+                    extractedBlocks.push({ time: new Date(timestampMs).toISOString(), price: val, res: calcResMin });
                 }
             }
         }
@@ -190,15 +185,15 @@ export default {
             
             const priceMap = new Map(existingPrices.map(obj => [obj.time, roundPrice(obj.price)]));
             
-            // V7.1: We simply insert the points exactly where they belong. No interpolation.
-            // If PT60M and PT15M both exist for "15:00", the latter one (or whichever arrives last) overwrites it cleanly.
+            // Simply overwrite/insert matching timestamps
             extractedBlocks.forEach(item => {
                 priceMap.set(item.time, item.price);
             });
 
+            // Pruning limits
             const nowMs = Date.now();
             const pruneLimitPastMs = nowMs - 48 * 3600 * 1000;
-            const pruneLimitFutureMs = nowMs + 48 * 3600 * 1000; 
+            const pruneLimitFutureMs = nowMs + 72 * 3600 * 1000; // 3 days into future to prevent cutoff
             
             const pruneLimitPastISO = new Date(pruneLimitPastMs).toISOString();
             const pruneLimitFutureISO = new Date(pruneLimitFutureMs).toISOString();
@@ -206,10 +201,6 @@ export default {
             const sortedPrices = Array.from(priceMap, ([time, price]) => ({ time, price }))
                 .filter(item => item.time >= pruneLimitPastISO && item.time <= pruneLimitFutureISO)
                 .sort((a, b) => new Date(a.time) - new Date(b.time));
-
-            // Optional: Filter out overlapping 60m points if 15m is the global standard
-            // E.g., if we have 15:00, 15:15, 15:30, 15:45, we keep them all.
-            // If we only have 15:00, 16:00, they stay intact. No manual filling.
 
             const now = new Date().toISOString();
             const latestTime = sortedPrices.length > 0 ? sortedPrices[sortedPrices.length - 1].time : now;
@@ -242,34 +233,16 @@ export default {
   },
 
   async updateStatusFile(env, lastPushTime) {
-    const getZoneTZ = (eic) => {
-        const wetZones = ["10Y1001A1001A92E", "10Y1001A1001A016", "10YPT-REN------W"];
-        const eetZones = [
-            "10YFI-1--------U", "10Y1001A1001A39I", "10YLV-1001A00074", "10YLT-1001A0008Q", 
-            "10YGR-HTSO-----Y", "10YCA-BULGARIA-R", "10YRO-TEL------P", "10Y1001C--000182", "10Y1001C--00096J"
-        ];
-        const trtZones = ["10YTR-TEIAS----W"];
-        
-        if (wetZones.includes(eic)) return "Europe/London";
-        if (eetZones.includes(eic)) return "Europe/Helsinki";
-        if (trtZones.includes(eic)) return "Europe/Istanbul";
-        return "Europe/Paris"; 
-    };
-
-    const getSyntheticLocalTime = (utcDate, tz) => {
-        const parts = new Intl.DateTimeFormat('en-US', { 
-            timeZone: tz, year: 'numeric', month: '2-digit', day: '2-digit',
-            hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false
-        }).formatToParts(utcDate);
-        
-        const p = {};
-        parts.forEach(part => p[part.type] = part.value);
-        if (p.hour === '24') p.hour = '00';
-        
-        return new Date(`${p.year}-${p.month}-${p.day}T${p.hour}:${p.minute}:${p.second}.000Z`);
-    };
-
     const nowUTC = new Date();
+    
+    // To see if "Today" is complete, we check if the dataset has points up until 
+    // at least 21:00 UTC (which is 23:00 CET/CEST or 22:00 BST) of the CURRENT UTC Day.
+    const currentUTCDay = new Date(Date.UTC(nowUTC.getUTCFullYear(), nowUTC.getUTCMonth(), nowUTC.getUTCDate()));
+    const targetTodayUTC = new Date(currentUTCDay.getTime() + 21 * 3600 * 1000).getTime(); // 21:00 UTC
+    
+    // To see if "Tomorrow" is complete, check if the dataset reaches 21:00 UTC of TOMORROW.
+    const targetTomorrowUTC = new Date(currentUTCDay.getTime() + 45 * 3600 * 1000).getTime(); // +24 hours
+    
     const listed = await env.ENTSOE_PRICES_R2_BUCKET.list({ include: ['customMetadata'] });
     
     let zones = listed.objects
@@ -281,22 +254,11 @@ export default {
             let isCompleteTomorrow = false;
             
             if (meta.latest) {
-                const tz = getZoneTZ(eic);
+                const latestDataMs = new Date(meta.latest).getTime();
                 
-                const syntheticNow = getSyntheticLocalTime(nowUTC, tz);
-                const currentLocalYear = syntheticNow.getUTCFullYear();
-                const currentLocalMonth = syntheticNow.getUTCMonth();
-                const currentLocalDay = syntheticNow.getUTCDate();
-                
-                const currentDayMidnight = new Date(Date.UTC(currentLocalYear, currentLocalMonth, currentLocalDay + 1)).getTime();
-                const nextDayMidnight = new Date(Date.UTC(currentLocalYear, currentLocalMonth, currentLocalDay + 2)).getTime();
-                
-                const resMinutes = parseInt(meta.res || "60");
-                const endTimeUTC = new Date(new Date(meta.latest).getTime() + resMinutes * 60000);
-                const syntheticEnd = getSyntheticLocalTime(endTimeUTC, tz).getTime();
-                
-                isCompleteToday = syntheticEnd >= currentDayMidnight;
-                isCompleteTomorrow = syntheticEnd >= nextDayMidnight;
+                // Compare pure UTC timestamps
+                isCompleteToday = latestDataMs >= targetTodayUTC;
+                isCompleteTomorrow = latestDataMs >= targetTomorrowUTC;
             }
             
             return { 
@@ -322,7 +284,7 @@ export default {
     const ratioTomorrow = zones.length > 0 ? (zones.filter(z => z.is_complete_tomorrow).length / zones.length) : 0;
 
     const statusPayload = { 
-        bridge: "PBTH Energy Bridge Pro (v7.1 Clean Parse)", 
+        bridge: "PBTH Energy Bridge Pro (v7.2 Pure UTC)", 
         license: LICENSE_TEXT,
         summary: { 
             total_zones: zones.length, 
