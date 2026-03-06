@@ -13,15 +13,14 @@
  */
 
 /**
- * Power by the Hour - ENTSO-E Energy Bridge (v7.3 R2 Edition - Gap Filler)
+ * Power by the Hour - ENTSO-E Energy Bridge (v7.4 R2 Edition - Gap Filler + Debug)
  *
- * CRITICAL FIXES IN V7.3:
- * 1. ENTSO-E Omitted Points (The "Smoking Gun"): Discovered via raw XML logs that TSOs 
- * routinely omit sequential `<Point>` nodes if the price remains identical to the previous 
- * interval (e.g. jumping from <position>55</position> directly to <position>60</position>). 
- * This caused severe temporal gaps in the JSON output, leading to app rejections. 
- * V7.3 now intelligently detects these missing position indices and automatically synthesizes 
- * the omitted intervals using the last known price.
+ * CRITICAL FIXES IN V7.4:
+ * 1. Restored Diagnostic Logger: Inbound XML payloads are once again securely saved to R2
+ * as `debug_[EIC].xml` for future troubleshooting and format analysis.
+ * 2. Retains V7.3 Gap Filler: Automatically detects and synthesizes omitted `<Point>` nodes 
+ * where TSOs drop sequential data points with identical prices.
+ * 3. Retains Pure UTC validation for status completion.
  */
 
 const ZONE_NAMES = {
@@ -71,6 +70,16 @@ export default {
         const xmlData = await request.text();
         
         if (xmlData.length > 50) {
+            // V7.4 RESTORED: Diagnostic Debug Logging
+            const tempEic = getTagValue(xmlData, "out_Domain.mRID");
+            if (tempEic) {
+                ctx.waitUntil(
+                    env.ENTSOE_PRICES_R2_BUCKET.put(`debug_${tempEic}.xml`, xmlData, {
+                        httpMetadata: { contentType: "application/xml", cacheControl: "no-cache" }
+                    })
+                );
+            }
+            
             ctx.waitUntil(this.processData(xmlData, env));
         } else {
             ctx.waitUntil(this.updateStatusFile(env, new Date().toISOString()));
@@ -110,7 +119,7 @@ export default {
         if (zone) {
             return Response.redirect(`${PUBLIC_R2_URL}/${zone}.json`, 301);
         }
-        return new Response("PBTH Energy Bridge v7.3 (Gap Filler) Online. Please use the public URL: " + PUBLIC_R2_URL, { status: 200 });
+        return new Response("PBTH Energy Bridge v7.4 (Gap Filler + Debug) Online. Please use the public URL: " + PUBLIC_R2_URL, { status: 200 });
     }
 
     return new Response("Method not allowed", { status: 405 });
@@ -158,9 +167,7 @@ export default {
                 
                 if (!isNaN(currentPos) && !isNaN(currentVal)) {
                     
-                    // V7.3 BUGFIX: Detect and Fill Omitted Intervals
-                    // If the TSO skips positions (e.g. from pos 55 directly to pos 60),
-                    // it means pos 56, 57, 58 and 59 inherited the price of pos 55.
+                    // Detect and Fill Omitted Intervals (Gap Filler)
                     if (lastPos > 0 && currentPos > (lastPos + 1)) {
                         for (let missingPos = lastPos + 1; missingPos < currentPos; missingPos++) {
                             const fillTimestampMs = periodStartTime.getTime() + (missingPos - 1) * calcResMin * 60000;
@@ -176,11 +183,6 @@ export default {
                     lastVal = currentVal;
                 }
             }
-            
-            // Note: If the period ends prematurely (e.g. 96th point is omitted), 
-            // ENTSO-E dictates we must fill until the `end` time of the period.
-            // For now, we trust the TSOs not to omit the absolute final boundary marker,
-            // as IEC 62325-451-3 requires the final boundary point to be explicitly declared.
         }
 
         if (extractedBlocks.length > 0) {
@@ -247,8 +249,7 @@ export default {
   async updateStatusFile(env, lastPushTime) {
     const nowUTC = new Date();
     
-    // Status Logic V7.2 - Pure UTC checks 
-    // 21:00 UTC = 22:00 CET/BST = Midnight for most of EU
+    // Status Logic - Pure UTC checks 
     const currentUTCDay = new Date(Date.UTC(nowUTC.getUTCFullYear(), nowUTC.getUTCMonth(), nowUTC.getUTCDate()));
     const targetTodayUTC = new Date(currentUTCDay.getTime() + 21 * 3600 * 1000).getTime();
     const targetTomorrowUTC = new Date(currentUTCDay.getTime() + 45 * 3600 * 1000).getTime(); 
@@ -292,7 +293,7 @@ export default {
     const ratioTomorrow = zones.length > 0 ? (zones.filter(z => z.is_complete_tomorrow).length / zones.length) : 0;
 
     const statusPayload = { 
-        bridge: "PBTH Energy Bridge Pro (v7.3 Gap Filler)", 
+        bridge: "PBTH Energy Bridge Pro (v7.4 Gap Filler + Debug)", 
         license: LICENSE_TEXT,
         summary: { 
             total_zones: zones.length, 
