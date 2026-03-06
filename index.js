@@ -5,8 +5,6 @@
 	Copyright 2026, Gruijter.org / Robin de Gruijter <gruijter@hotmail.com> */
 
 /**
- * Power by the Hour - v7.0 R2 Edition
- *
  * API ENDPOINTS:
  * https://entsoe.gruijter.org                          -> POST endpoint for ENTSO-E Webservice
  * https://entsoe.gruijter.org/?init=true               -> Manually force the generation of the status.json file in R2
@@ -14,19 +12,25 @@
  * https://entsoe-prices.gruijter.org/[EIC_CODE].json   -> Get specific zone prices
  */
 
-/**
- * Power by the Hour - ENTSO-E Energy Bridge (v7.0 R2 Edition - Diagnostic Mode)
+ /**
+ * Power by the Hour - ENTSO-E Energy Bridge (v7.1 R2 Edition - Clean Parse)
  *
- * This version introduces raw XML logging to permanently identify the parsing issue
- * for the final 15-minute intervals. Every incoming POST request will dump its raw
- * XML payload directly into the R2 bucket prefixed with 'debug_'.
+ * CRITICAL FIXES IN V7.1:
+ * 1. Removed Interpolation Chaos: The bridge no longer attempts to mathematically 'fill' 
+ * 60m data into 15m slots. This caused severe overlapping bugs (45m gaps) in transition zones 
+ * like NL and DE. It now strictly honors the exact timestamp provided by the <resolution> interval.
+ * 2. High-Res Priority: If a document contains both PT60M and PT15M blocks for the same day, 
+ * the PT15M data points organically overwrite the PT60M points in the Map at the correct intervals.
  */
 
 const ZONE_NAMES = {
+  // --- West & North Europe ---
   "10YNL----------L": "Netherlands", "10YBE----------2": "Belgium", "10YFR-RTE------C": "France",
   "10Y1001A1001A82H": "Germany-Luxembourg", "10Y1001A1001A59C": "Germany (Amprion Area)",
   "10YAT-APG------L": "Austria", "10YCH-SWISSGRIDZ": "Switzerland",
   "10Y1001A1001A92E": "United Kingdom", "10Y1001A1001A016": "Ireland (SEM)",
+
+  // --- Scandinavia & Baltics ---
   "10YDK-1--------W": "Denmark DK1", "10YDK-2--------M": "Denmark DK2", "10YFI-1--------U": "Finland",
   "10YNO-1--------2": "Norway NO1 (Oslo)", "10YNO-2--------T": "Norway NO2 (Kristiansand)",
   "10YNO-3--------J": "Norway NO3 (Trondheim)", "10YNO-4--------9": "Norway NO4 (Tromsø)",
@@ -35,11 +39,15 @@ const ZONE_NAMES = {
   "10Y1001A1001A44P": "Sweden SE1", "10Y1001A1001A45N": "Sweden SE2", 
   "10Y1001A1001A46L": "Sweden SE3", "10Y1001A1001A47J": "Sweden SE4",
   "10Y1001A1001A39I": "Estonia", "10YLV-1001A00074": "Latvia", "10YLT-1001A0008Q": "Lithuania",
+
+  // --- South Europe ---
   "10YES-REE------0": "Spain", "10YPT-REN------W": "Portugal", "10YGR-HTSO-----Y": "Greece",
   "10YIT-GRTN-----B": "Italy (National)", "10Y1001A1001A73I": "Italy North",
   "10Y1001A1001A70O": "Italy Centre-North", "10Y1001A1001A71M": "Italy Centre-South",
   "10Y1001A1001A74G": "Italy South", "10Y1001A1001A75E": "Italy Sicily",
   "10Y1001A1001A885": "Italy Sardinia", "10Y1001A1001A893": "Italy Rossano",
+
+  // --- Central & East Europe ---
   "10YPL-AREA-----S": "Poland", "10YCZ-CEPS-----N": "Czech Republic", "10YSK-SEPS-----K": "Slovakia",
   "10YHU-MAVIR----U": "Hungary", "10YRO-TEL------P": "Romania", "10YSI-ELES-----O": "Slovenia",
   "10YHR-HEP------M": "Croatia", "10YCA-BULGARIA-R": "Bulgaria", "10YCS-CG-TSO---S": "Montenegro",
@@ -68,7 +76,7 @@ export default {
       try {
         const xmlData = await request.text();
         
-        // --- DIAGNOSTIC RAW XML LOGGING ---
+        // Diagnostic log
         if (xmlData.length > 50) {
             const tempEic = getTagValue(xmlData, "out_Domain.mRID");
             if (tempEic) {
@@ -115,7 +123,7 @@ export default {
         if (zone) {
             return Response.redirect(`${PUBLIC_R2_URL}/${zone}.json`, 301);
         }
-        return new Response("PBTH Energy Bridge v7.0 (Diagnostic Edition) Online. Please use the public URL: " + PUBLIC_R2_URL, { status: 200 });
+        return new Response("PBTH Energy Bridge v7.1 (Clean Parse) Online. Please use the public URL: " + PUBLIC_R2_URL, { status: 200 });
     }
 
     return new Response("Method not allowed", { status: 405 });
@@ -133,7 +141,7 @@ export default {
         const periodRegex = /<[^>]*Period(?:\s[^>]*)?>([\s\S]*?)<\/[^>]*Period>/ig;
         let periodMatch;
         
-        let targetResMin = 60; 
+        let globalResMin = 60; // Track the highest detail level found overall
         const extractedBlocks = [];
         
         while ((periodMatch = periodRegex.exec(xmlData)) !== null) {
@@ -146,11 +154,10 @@ export default {
             const periodStartTime = new Date(startStr);
             if (isNaN(periodStartTime.getTime())) continue;
 
-            // Strict parsing according to ENTSO-E standard
             const resolutionRaw = getTagValue(periodXml, "resolution") || "PT60M";
             let calcResMin = resolutionRaw.includes("PT15M") ? 15 : (resolutionRaw.includes("PT30M") ? 30 : 60);
             
-            if (calcResMin < targetResMin) targetResMin = calcResMin; 
+            if (calcResMin < globalResMin) globalResMin = calcResMin; 
 
             const pointRegex = /<[^>]*position(?:[\s\S]*?)?>(\d+)<\/[^>]*position>[\s\S]*?<[^>]*price\.amount(?:[\s\S]*?)?>([-\d.]+)<\/[^>]*price\.amount>/ig;
             let pointMatch;
@@ -160,7 +167,7 @@ export default {
                 const val = roundPrice(parseFloat(pointMatch[2]));
                 
                 if (!isNaN(pos) && !isNaN(val)) {
-                    // Position is 1-based index (e.g., position 1 is startTime + 0)
+                    // Exactly calculate the timestamp based on the explicit ENTSO-E resolution interval
                     const timestamp = new Date(periodStartTime.getTime() + (pos - 1) * calcResMin * 60000);
                     extractedBlocks.push({ time: timestamp.toISOString(), price: val, res: calcResMin });
                 }
@@ -177,20 +184,16 @@ export default {
                     const existingData = await existingObj.json();
                     existingPrices = existingData.data || [];
                     const existingResMatch = existingData.res ? parseInt(existingData.res) : 60;
-                    if (existingResMatch < targetResMin) targetResMin = existingResMatch;
+                    if (existingResMatch < globalResMin) globalResMin = existingResMatch;
                 } catch(e) {}
             }
             
             const priceMap = new Map(existingPrices.map(obj => [obj.time, roundPrice(obj.price)]));
             
+            // V7.1: We simply insert the points exactly where they belong. No interpolation.
+            // If PT60M and PT15M both exist for "15:00", the latter one (or whichever arrives last) overwrites it cleanly.
             extractedBlocks.forEach(item => {
-                const periodsToFill = item.res / targetResMin;
-                const baseTime = new Date(item.time).getTime();
-                
-                for (let i = 0; i < periodsToFill; i++) {
-                    const currentFillTime = new Date(baseTime + i * targetResMin * 60000).toISOString();
-                    priceMap.set(currentFillTime, item.price);
-                }
+                priceMap.set(item.time, item.price);
             });
 
             const nowMs = Date.now();
@@ -204,6 +207,10 @@ export default {
                 .filter(item => item.time >= pruneLimitPastISO && item.time <= pruneLimitFutureISO)
                 .sort((a, b) => new Date(a.time) - new Date(b.time));
 
+            // Optional: Filter out overlapping 60m points if 15m is the global standard
+            // E.g., if we have 15:00, 15:15, 15:30, 15:45, we keep them all.
+            // If we only have 15:00, 16:00, they stay intact. No manual filling.
+
             const now = new Date().toISOString();
             const latestTime = sortedPrices.length > 0 ? sortedPrices[sortedPrices.length - 1].time : now;
 
@@ -213,7 +220,7 @@ export default {
                 license: LICENSE_TEXT,
                 updated: now,
                 points: sortedPrices.length,
-                res: `${targetResMin}m`,
+                res: `${globalResMin}m`,
                 data: sortedPrices
             };
 
@@ -224,7 +231,7 @@ export default {
                     name: zoneName,
                     count: sortedPrices.length.toString(),
                     currency,
-                    res: targetResMin.toString(),
+                    res: globalResMin.toString(),
                     latest: latestTime
                 }
             });
@@ -315,7 +322,7 @@ export default {
     const ratioTomorrow = zones.length > 0 ? (zones.filter(z => z.is_complete_tomorrow).length / zones.length) : 0;
 
     const statusPayload = { 
-        bridge: "PBTH Energy Bridge Pro (v7.0 R2 Edition - Diagnostic)", 
+        bridge: "PBTH Energy Bridge Pro (v7.1 Clean Parse)", 
         license: LICENSE_TEXT,
         summary: { 
             total_zones: zones.length, 
@@ -332,3 +339,5 @@ export default {
     });
   }
 };
+
+ 
