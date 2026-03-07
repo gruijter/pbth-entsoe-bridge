@@ -12,9 +12,7 @@
  * https://entsoe-prices.gruijter.org/[EIC_CODE].json   -> Get specific zone prices
  */
 
-/**
- * Power by the Hour - ENTSO-E Energy Bridge (v8.2 R2 Edition - REGEX parse fix)
- */
+const BRIDGE_VERSION = "v8.2 R2 Edition - REGEX parse fix";
 
 const ZONE_NAMES = {
   "10YNL----------L": "Netherlands", "10YBE----------2": "Belgium", "10YFR-RTE------C": "France",
@@ -111,7 +109,7 @@ export default {
         if (zone) {
             return Response.redirect(`${PUBLIC_R2_URL}/${zone}.json`, 301);
         }
-        return new Response("PBTH Energy Bridge v8.1 (A03 Compliance) Online. Please use the public URL: " + PUBLIC_R2_URL, { status: 200 });
+        return new Response(`PBTH Energy Bridge ${BRIDGE_VERSION} Online. Please use the public URL: ` + PUBLIC_R2_URL, { status: 200 });
     }
 
     return new Response("Method not allowed", { status: 405 });
@@ -308,7 +306,7 @@ export default {
     const ratioTomorrow = zones.length > 0 ? (zones.filter(z => z.is_complete_tomorrow).length / zones.length) : 0;
 
     const statusPayload = { 
-        bridge: "PBTH Energy Bridge Pro (v8.1 A03 Restored)", 
+        bridge: `PBTH Energy Bridge Pro (${BRIDGE_VERSION})`, 
         license: LICENSE_TEXT,
         summary: { 
             total_zones: zones.length, 
