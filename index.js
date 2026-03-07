@@ -13,15 +13,7 @@
  */
 
 /**
- * Power by the Hour - ENTSO-E Energy Bridge (v8.1 R2 Edition - A03 Curve Compliance)
- *
- * CRITICAL FIXES IN V8.1:
- * 1. A03 Curve Restored: Re-implemented the position padder strictly to comply with 
- * ENTSO-E's A03 (Step Curve) methodology. If TSOs omit <Point> nodes (mid-period or 
- * end-of-period), the bridge correctly carries over the previous price. 
- * 2. No Resolution Mixing: 60m data stays 60m data. 15m data stays 15m data. 
- * Padding only occurs within the explicit <resolution> interval provided in the XML.
- * 3. Diagnostic logging to `debug_[EIC].xml` is retained.
+ * Power by the Hour - ENTSO-E Energy Bridge (v8.2 R2 Edition - REGEX parse fix)
  */
 
 const ZONE_NAMES = {
@@ -139,6 +131,7 @@ export default {
         
         let fileDominantResMin = 60; 
         const extractedBlocks = [];
+        const pointBlockRegex = /<[^>]*Point(?:\s[^>]*)?>([\s\S]*?)<\/[^>]*Point>/ig;
         
         while ((periodMatch = periodRegex.exec(xmlData)) !== null) {
             const periodXml = periodMatch[1];
@@ -161,15 +154,21 @@ export default {
             const totalDurationMs = periodEndTime.getTime() - periodStartTime.getTime();
             const expectedPoints = Math.round(totalDurationMs / (calcResMin * 60000));
 
-            const pointRegex = /<[^>]*position(?:[\s\S]*?)?>(\d+)<\/[^>]*position>[\s\S]*?<[^>]*price\.amount(?:[\s\S]*?)?>([-\d.]+)<\/[^>]*price\.amount>/ig;
+            pointBlockRegex.lastIndex = 0;
             let pointMatch;
             
             let lastPos = 0;
             let lastVal = 0;
             
-            while ((pointMatch = pointRegex.exec(periodXml)) !== null) {
-                const currentPos = parseInt(pointMatch[1]);
-                const currentVal = roundPrice(parseFloat(pointMatch[2]));
+            while ((pointMatch = pointBlockRegex.exec(periodXml)) !== null) {
+                const pointXml = pointMatch[1];
+                const posStr = getTagValue(pointXml, "position");
+                const priceStr = getTagValue(pointXml, "price.amount");
+
+                if (!posStr || !priceStr) continue;
+
+                const currentPos = parseInt(posStr);
+                const currentVal = roundPrice(parseFloat(priceStr));
                 
                 if (!isNaN(currentPos) && !isNaN(currentVal)) {
                     
