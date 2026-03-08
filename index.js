@@ -12,7 +12,7 @@
  * https://entsoe-prices.gruijter.org/[EIC_CODE].json   -> Get specific zone prices
  */
 
-const BRIDGE_VERSION = "v8.2 R2 Edition - REGEX parse fix";
+const BRIDGE_VERSION = "v8.3 - 8 digit prices and R2 pagination";
 
 const ZONE_NAMES = {
   "10YNL----------L": "Netherlands", "10YBE----------2": "Belgium", "10YFR-RTE------C": "France",
@@ -49,7 +49,7 @@ const getTagValue = (xml, tagName) => {
   return match ? match[2].trim() : null;
 };
 
-const roundPrice = (p) => Math.round(p * 1000) / 1000;
+const roundPrice = (p) => Math.round(p * 100000000) / 100000000;
 
 export default {
   async fetch(request, env, ctx) {
@@ -267,9 +267,18 @@ export default {
     const targetTodayUTC = new Date(currentUTCDay.getTime() + 21 * 3600 * 1000).getTime();
     const targetTomorrowUTC = new Date(currentUTCDay.getTime() + 45 * 3600 * 1000).getTime(); 
     
-    const listed = await env.ENTSOE_PRICES_R2_BUCKET.list({ include: ['customMetadata'] });
+    let allObjects = [];
+    let cursor;
+    do {
+        const listed = await env.ENTSOE_PRICES_R2_BUCKET.list({ 
+            include: ['customMetadata'],
+            cursor
+        });
+        allObjects.push(...listed.objects);
+        cursor = listed.truncated ? listed.cursor : undefined;
+    } while (cursor);
     
-    let zones = listed.objects
+    let zones = allObjects
         .filter(k => k.key !== 'status.json' && !k.key.startsWith('debug_') && k.key.endsWith('.json'))
         .map(k => {
             const meta = k.customMetadata || {};

@@ -1,7 +1,7 @@
 # Power by the Hour - ENTSO-E Energy Bridge
 
 ## Overview
-This repository contains the highly optimized Cloudflare Worker implementation for the "Power by the Hour" ENTSO-E Energy Bridge (v4.5 R2 Edition). 
+This repository contains the highly optimized Cloudflare Worker implementation for the "Power by the Hour" ENTSO-E Energy Bridge (v8.3). 
 
 It acts as a lightning-fast, highly scalable middleman between the **ENTSO-E Transparency Platform (Subscription Push Service)** and a fleet of 16,000+ Homey smart home controllers.
 
@@ -9,7 +9,7 @@ It acts as a lightning-fast, highly scalable middleman between the **ENTSO-E Tra
 The bridge is designed to handle millions of daily requests for free, bypassing traditional database and Serverless execution limits:
 - **Cloudflare R2 Storage:** KV storage has been completely removed. Static JSON files are generated upon receiving an XML push from ENTSO-E.
 - **CDN Edge Caching:** Homey apps download the .json files directly from the Cloudflare CDN, saving 100% of Worker execution limits for actual ENTSO-E pushes.
-- **Smart Diff Checker:** The Worker checks incoming XML against existing R2 data. It only writes to R2 if the prices actually changed, drastically saving on PUT operations.
+- **Smart Data Merging:** The Worker merges incoming XML data with existing R2 data. This ensures historical data is preserved and gaps are filled, while maintaining a rolling window of prices.
 - **Bulletproof Parser:** Automatically ignores corrupt price.amount tags (NaN) or missing timestamps pushed by local TSOs. Future data is safely preserved during partial historical updates.
 - **Strict SOAP Compliance:** Automatically parses and returns the mandatory IEC 62325-504 ResponseMessage to keep ENTSO-E servers happy.
 
@@ -21,7 +21,7 @@ All requests from the Homey app should be standard HTTP GET requests directed at
   *Returns an index of all supported zones, their last update timestamp, and a crucial is_complete_tomorrow boolean. Use this for Smart Polling.*
 
 - **Fetch Zone Prices:** GET https://entsoe-prices.gruijter.org/[EIC_CODE].json
-  *Example: .../10YNL----------L.json returns the pruned 48-hour price array for the Netherlands.*
+  *Example: .../10YNL----------L.json returns the pruned price array (48h past, 72h future) for the Netherlands.*
 
 > **Legacy Endpoints:** Any legacy requests hitting the Worker directly will automatically return a 301 Redirect to the static R2 URL to force clients onto the CDN.
 
