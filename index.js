@@ -331,6 +331,19 @@ export default {
     const targetTodayUTC = new Date(currentUTCDay.getTime() + 21 * 3600 * 1000).getTime();
     const targetTomorrowUTC = new Date(currentUTCDay.getTime() + 45 * 3600 * 1000).getTime(); 
     
+    const lockName = 'lock_status_update';
+    const lockObj = await env.ENTSOE_PRICES_R2_BUCKET.get(lockName);
+    if (lockObj) {
+        const lockTime = parseInt(await lockObj.text() || "0");
+        // Als een andere instantie de status al aan het updaten is (minder dan 15 sec geleden gestart),
+        // sla deze zware taak dan over. Die andere instantie neemt onze wijzigingen toch al mee in de list() actie.
+        if (Date.now() - lockTime < 15000) {
+            return; 
+        }
+    }
+    await env.ENTSOE_PRICES_R2_BUCKET.put(lockName, Date.now().toString());
+
+    try {
     let allObjects = [];
     let cursor;
     do {
@@ -410,6 +423,9 @@ export default {
     // Clean up old batch debug files
     if (keysToDelete.length > 0) {
         await env.ENTSOE_PRICES_R2_BUCKET.delete(keysToDelete);
+    }
+    } finally {
+        await env.ENTSOE_PRICES_R2_BUCKET.delete(lockName);
     }
   }
 };
