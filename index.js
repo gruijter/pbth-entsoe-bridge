@@ -12,7 +12,7 @@
  * https://entsoe-prices.gruijter.org/[EIC_CODE].json   -> Get specific zone prices
  */
 
-const BRIDGE_VERSION = "v8.5 status update debounce lock";
+const BRIDGE_VERSION = "v8.6 extended xml logging";
 
 const ZONE_NAMES = {
   "10YNL----------L": "Netherlands", "10YBE----------2": "Belgium", "10YFR-RTE------C": "France",
@@ -67,11 +67,11 @@ export default {
             const domainMatches = Array.from(xmlData.matchAll(/<([a-zA-Z0-9_\-]*:)?(in_Domain\.mRID|out_Domain\.mRID)(?:\s[^>]*)?>([^<]+)<\/([a-zA-Z0-9_\-]*:)?\2>/ig));
             const uniqueEics = new Set(domainMatches.map(m => m[3].trim()));
             
+            const timestamp = new Date().toISOString().replace(/:/g, '-');
             let debugFileName;
             if (uniqueEics.size === 1) {
-                debugFileName = `debug_${Array.from(uniqueEics)[0]}.xml`;
+                debugFileName = `debug_${Array.from(uniqueEics)[0]}_${timestamp}.xml`;
             } else {
-                const timestamp = new Date().toISOString().replace(/:/g, '-');
                 debugFileName = `debug_batch_${timestamp}.xml`;
             }
             
@@ -138,7 +138,15 @@ export default {
 
         while ((tsMatch = timeSeriesRegex.exec(xmlData)) !== null) {
             const tsXml = tsMatch[1];
-            const zoneEic = getTagValue(tsXml, "in_Domain.mRID") || getTagValue(tsXml, "out_Domain.mRID") || getTagValue(xmlData, "out_Domain.mRID");
+            let zoneEic = getTagValue(tsXml, "in_Domain.mRID") || getTagValue(tsXml, "out_Domain.mRID");
+            
+            if (!zoneEic) {
+                zoneEic = getTagValue(xmlData, "out_Domain.mRID");
+                if (zoneEic) {
+                    console.warn(`Warning: TimeSeries missing internal domain. Falling back to document root domain: ${zoneEic}. In a batch file, this might misattribute data!`);
+                }
+            }
+
             if (!zoneEic) continue;
 
             if (!parsedZones.has(zoneEic)) {
@@ -362,7 +370,7 @@ export default {
         .filter(k => {
             if (k.key === 'status.json') return false;
             if (k.key.startsWith('debug_')) {
-                if (k.key.startsWith('debug_batch_') && new Date(k.uploaded).getTime() < threeDaysAgoMs) {
+                if (new Date(k.uploaded).getTime() < threeDaysAgoMs) {
                     keysToDelete.push(k.key);
                 }
                 return false;
