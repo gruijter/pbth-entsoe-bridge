@@ -12,7 +12,7 @@
  * https://entsoe-prices.gruijter.org/[EIC_CODE].json   -> Get specific zone prices
  */
 
-const BRIDGE_VERSION = "v8.4 - Batch XML handling and Logging";
+const BRIDGE_VERSION = "v8.5 status update debounce lock";
 
 const ZONE_NAMES = {
   "10YNL----------L": "Netherlands", "10YBE----------2": "Belgium", "10YFR-RTE------C": "France",
